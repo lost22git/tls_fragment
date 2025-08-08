@@ -1,5 +1,4 @@
-import
-  std/[os, strformat, strutils, sequtils, net, logging, typedThreads, exitprocs, oids]
+import std/[strformat, strutils, sequtils, net, logging, typedThreads, exitprocs, oids]
 
 func bigEndian16(data: openArray[char]): uint16 =
   (data[0].uint16 shl 8) + (data[1].uint16)
@@ -179,7 +178,7 @@ proc proxyProtocolHandshake(client: Socket): (string, uint16) =
 
 # === Client ===
 
-type ClientObj = object
+type Client = ref object
   id: Oid
   config: ClientConfig
   sock: Socket
