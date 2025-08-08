@@ -3,7 +3,7 @@ name: Nim CI
 on:
   push:
   pull_request:
-  
+
 jobs:
   test:
     strategy:
@@ -11,14 +11,16 @@ jobs:
       matrix:
         include:
           - {os: ubuntu-latest}
-          # - {os: macos-latest}
+          - {os: macos-latest}
           # - {os: windows-latest}
     runs-on: ${{ matrix.os }}
     steps:
-      - name: Install Nim
-        uses: jiro4989/setup-nim-action@v2
       - name: Check out repository code
         uses: actions/checkout@v4
+      - name: Install Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Install deps
         run: nimble install -y
       - name: Build pool version
