@@ -21,4 +21,3 @@ task buildAsync, "build async version":
 
 task buildPool, "build thread pool version":
   exec "nimble build --verbose -d:release -d:lto -d:pool"
-
