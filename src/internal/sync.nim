@@ -26,24 +26,26 @@ proc socks5ExtractServerAddr(client: Socket): (string, uint16) =
     var data: array[0 .. 3, uint8]
     discard client.recv(data.addr, 4)
     let ipv4 = IpAddress(family: IPv4, address_v4: data)
-    let port = client.recv(2).bigEndian16()
+    let port = client.recv(2).be16()
     result = ($ipv4, port)
   of 0x03: # Domain name (len(1B)+name)
     let len = client.recv(1)[0].int
     let domain = client.recv(len)
-    let port = client.recv(2).bigEndian16()
+    let port = client.recv(2).be16()
     result = (domain, port)
   of 0x04: # IPV6
     var data: array[0 .. 15, uint8]
     discard client.recv(data.addr, 16)
     let ipv6 = IpAddress(family: IPv6, address_v6: data)
-    let port = client.recv(2).bigEndian16()
+    let port = client.recv(2).be16()
     result = ($ipv6, port)
   else:
     return
 
 proc socks5Handshake(client: Socket): (string, uint16) =
   ## handle socks5 proxy handshake
+  ##
+  ## https://en.m.wikipedia.org/wiki/SOCKS
   ##
   ## NOTE:
   ## we only support tcp and no auth now.

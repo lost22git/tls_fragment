@@ -26,25 +26,27 @@ proc socks5ExtractServerAddr(client: AsyncSocket): Future[(string, uint16)] {.as
     var data: array[0 .. 3, uint8]
     discard await client.recvInto(data.addr, 4)
     let ipv4 = IpAddress(family: IPv4, address_v4: data)
-    let port = (await client.recv(2)).bigEndian16()
+    let port = (await client.recv(2)).be16()
     result = ($ipv4, port)
   of 0x03: # Domain name (len(1B)+name)
     let len = (await client.recv(1))[0].int
     let domain = await client.recv(len)
-    let port = (await client.recv(2)).bigEndian16()
+    let port = (await client.recv(2)).be16()
     result = (domain, port)
   of 0x04: # IPV6
     var data: array[0 .. 15, uint8]
     discard await client.recvInto(data.addr, 16)
     let ipv6 = IpAddress(family: IPv6, address_v6: data)
-    let port = (await client.recv(2)).bigEndian16()
+    let port = (await client.recv(2)).be16()
     result = ($ipv6, port)
   else:
     return
 
 proc socks5Handshake(client: AsyncSocket): Future[(string, uint16)] {.async.} =
   ## handle socks5 proxy handshake
-  ## 
+  ##
+  ## https://en.m.wikipedia.org/wiki/SOCKS
+  ##
   ## NOTE:
   ## we only support tcp and no auth now.
 
@@ -113,7 +115,7 @@ proc httpHandshake(client: AsyncSocket): Future[(string, uint16)] {.async.} =
 
 proc proxyProtocolHandshake(client: AsyncSocket): Future[(string, uint16)] {.async.} =
   ## handle proxy protocol handshake
-  ## 
+  ##
   ## supported proxy protocols:
   ## 1. http
   ## 2. socks5
@@ -155,7 +157,7 @@ proc connectRemote(client: Client, remoteAddress: (string, uint16)) {.async.} =
   ## connect to remote
   ##
   ## TODO:
-  ## 1. doh resolve remoteAddress
+  ## 1. doh resolve remoteAddress to avoid dns hijack
 
   let remoteSock = newAsyncSocket(buffered = false)
   let (host, port) = remoteAddress
@@ -163,19 +165,65 @@ proc connectRemote(client: Client, remoteAddress: (string, uint16)) {.async.} =
   client.remoteAddress = remoteAddress
   client.remoteSock = remoteSock
 
+proc handleTlsClientHello(client: Client) {.async.} =
+  ## handle TLS client hello
+  ##
+  ## https://tls13.xargs.org/#client-hello
+
+  let recordHeader = await client.sock.recv(5)
+
+  let recordType = recordHeader[0].int
+  if recordType != 0x16:
+    raise newException(
+      ValueError,
+      fmt"not a TLS handshake message, record type: {recordType=}, must be 0x16(handshake)",
+    )
+  let handshakeDataLen = recordHeader[3 ..< 5].be32.int
+  let handshakeHeaderLen = 4
+  if handshakeDataLen <= handshakeHeaderLen:
+    raise newException(ValueError, "invalid a TLS handshake message, too small")
+
+  let handshakeData = await client.sock.recv(handshakeDataLen)
+
+  if handshakeData[0].int != 0x01:
+    raise newException(ValueError, "not a TLS client hello message")
+  let clientHelloDataLen = handshakeData[1 .. 3].be32.int
+  if clientHelloDataLen.int != (handshakeDataLen - handshakeHeaderLen):
+    raise
+      newException(ValueError, "invalid TLS client hello message, inconsistent length")
+
+  # parse TLS client hello
+  let (sni, isTls13) = parseTlsClientHello(handshakeData[handshakeHeaderLen .. ^1])
+  if not isTls13:
+    raise newException(ValueError, "not TLS 1.3")
+
+  assert sni != ""
+  info client, ": ", fmt"{sni=}"
+
+  # fragmentize TLS client hello
+  let fragmentList = fragmentizeTlsClientHello(handshakeData, sni, recordHeader[..2])
+  info client, ": ", fmt"send TLS client hello, {fragmentList.len=}"
+
+  # send fragmentList
+  for fragment in fragmentList:
+    await client.remoteSock.send(fragment)
+
 proc upstreaming(client: Client) {.async.} =
   ## upstreaming
-  ##
-  ## TODO:
-  ## 1. tls fragment to avoid exposing sni on tls handshake
 
+  var tlsClientHello = true
   while true:
-    let data = await client.sock.recv(16384)
-    if data == "":
-      raise newException(ValueError, "upstream data is EOF (client is disconnected)")
-    debug client, ": ", fmt"upstream {data.len=}"
-    debug client, ": ", fmt"upstream {data=}"
-    await client.remoteSock.send(data)
+    if tlsClientHello:
+      tlsClientHello = false
+      info client, ": ", "handling TLS client hello"
+      await handleTlsClientHello(client)
+    else:
+      let data = await client.sock.recv(16384)
+      if data == "":
+        raise newException(ValueError, "upstream data is EOF (client is disconnected)")
+      debug client, ": ", fmt"upstream {data.len=}"
+      debug client, ": ", fmt"upstream {data=}"
+      await client.remoteSock.send(data)
 
 proc downstreaming(client: Client) {.async.} =
   ## downstreaming
@@ -203,12 +251,12 @@ proc downstreamingThreadProc(client: Client) {.async.} =
 
 proc streaming(client: Client) {.async.} =
   ## client streaming
-  ## 
+  ##
   ## main steps:
   ## 1. spawn a thread to downstreaming
   ## 2. upstreaming
 
-  info client, ": ", "spawn to downstreaming"
+  info client, ": ", "spawn downstreaming"
   asyncCheck downstreamingThreadProc(client)
 
   try:
