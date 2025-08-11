@@ -165,19 +165,68 @@ proc connectRemote(client: Client, remoteAddress: (string, uint16)) =
   client.remoteAddress = remoteAddress
   client.remoteSock = remoteSock
 
+proc handleTlsClientHello(client: Client) =
+  ## handle TLS client hello
+  ##
+  ## https://tls13.xargs.org/#client-hello
+
+  let recordHeader = client.sock.recv(5)
+
+  let recordType = recordHeader[0].int
+  if recordType != 0x16:
+    raise newException(
+      ValueError,
+      fmt"not a TLS handshake message, record type: {recordType=}, must be 0x16(handshake)",
+    )
+  let handshakeDataLen = recordHeader[3 ..< 5].be32.int
+  let handshakeHeaderLen = 4
+  if handshakeDataLen <= handshakeHeaderLen:
+    raise newException(ValueError, "invalid a TLS handshake message, too small")
+
+  let handshakeData = client.sock.recv(handshakeDataLen)
+
+  if handshakeData[0].int != 0x01:
+    raise newException(ValueError, "not a TLS client hello message")
+  let clientHelloDataLen = handshakeData[1 .. 3].be32.int
+  if clientHelloDataLen.int != (handshakeDataLen - handshakeHeaderLen):
+    raise
+      newException(ValueError, "invalid TLS client hello message, inconsistent length")
+
+  # parse TLS client hello
+  let (sni, isTls13) = parseTlsClientHello(handshakeData[handshakeHeaderLen .. ^1])
+  if not isTls13:
+    raise newException(ValueError, "not TLS 1.3")
+
+  assert sni != ""
+  info client, ": ", fmt"{sni=}"
+
+  # fragmentize TLS client hello
+  let fragmentList = fragmentizeTlsClientHello(handshakeData, sni, recordHeader[..2])
+  info client, ": ", fmt"send TLS client hello, {fragmentList.len=}"
+
+  # send fragmentList
+  for fragment in fragmentList:
+    client.remoteSock.send(fragment)
+
 proc upstreaming(client: Client) =
   ## upstreaming
   ##
   ## TODO:
   ## 1. tls fragment to avoid exposing sni on tls handshake
 
+  var tlsClientHello = true
   while true:
-    let data = client.sock.recv(16384)
-    if data == "":
-      raise newException(ValueError, "upstream data is EOF (client is disconnected)")
-    debug client, ": ", fmt"upstream {data.len=}"
-    debug client, ": ", fmt"upstream {data=}"
-    client.remoteSock.send(data)
+    if tlsClientHello:
+      tlsClientHello = false
+      info client, ": ", "handling TLS client hello"
+      client.handleTlsClientHello()
+    else:
+      let data = client.sock.recv(16384)
+      if data == "":
+        raise newException(ValueError, "upstream data is EOF (client is disconnected)")
+      debug client, ": ", fmt"upstream {data.len=}"
+      debug client, ": ", fmt"upstream {data=}"
+      client.remoteSock.send(data)
 
 proc downstreaming(client: Client) =
   ## downstreaming

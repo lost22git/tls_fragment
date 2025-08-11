@@ -216,7 +216,7 @@ proc upstreaming(client: Client) {.async.} =
     if tlsClientHello:
       tlsClientHello = false
       info client, ": ", "handling TLS client hello"
-      await handleTlsClientHello(client)
+      await client.handleTlsClientHello()
     else:
       let data = await client.sock.recv(16384)
       if data == "":
