@@ -341,6 +341,8 @@ proc start(server: Server) {.async.} =
     client.address = client.sock.getPeerAddr()
     asyncCheck handleClient(client)
 
+# === Main ===
+
 var server = Server(config: config.server)
 asyncCheck server.start()
 runForever()

@@ -1,7 +1,13 @@
 import std/[strformat, strutils, sequtils, net, logging, typedThreads, oids]
 import ./common
 
-echo "=== SYNC ==="
+when defined(pool):
+  import weave
+
+when defined(pool):
+  echo "=== POOL ==="
+else:
+  echo "=== SYNC ==="
 
 # === Proxy Protocol Handshake ===
 
@@ -135,8 +141,9 @@ type Client = ref object
   remoteSock: Socket
   address: (string, uint16)
   remoteAddress: (string, uint16)
-  runThread: Thread[Client]
-  downstreamThread: Thread[Client]
+  when not defined(pool):
+    runThread: Thread[Client]
+    downstreamThread: Thread[Client]
 
 func `$`(client: Client): string =
   return
@@ -246,6 +253,8 @@ proc downstreamingThreadProc(client: Client) {.thread.} =
 
   {.gcsafe.}:
     addHandler(logger)
+    when defined(pool):
+      removeHandler(logger)
 
   try:
     client.downstreaming()
@@ -263,7 +272,10 @@ proc streaming(client: Client) =
   ## 2. upstreaming
 
   info client, ": ", "spawn to downstreaming"
-  createThread(client.downstreamThread, downstreamingThreadProc, client)
+  when defined(pool):
+    spawn downstreamingThreadProc(client)
+  else:
+    createThread(client.downstreamThread, downstreamingThreadProc, client)
 
   try:
     info client, ": ", "upstreaming"
@@ -283,6 +295,8 @@ proc handleClient(client: Client) {.thread.} =
 
   {.gcsafe.}:
     addHandler(logger)
+    when defined(pool):
+      removeHandler(logger)
 
   info client, ": ", "client is connected"
 
@@ -321,7 +335,8 @@ type Server = ref object
   config: ServerConfig
   sock: Socket
   runThread: Thread[Server]
-  clientList: seq[Client]
+  when not defined(pool):
+    clientList: seq[Client]
 
 proc close(server: Server) =
   ## close proxy server
@@ -341,6 +356,8 @@ proc start(server: Server) {.thread.} =
 
   {.gcsafe.}:
     addHandler(logger)
+    when defined(pool):
+      removeHandler(logger)
 
   server.sock = newSocket(buffered = false)
   server.sock.setSockOpt(OptReusePort, true)
@@ -353,24 +370,38 @@ proc start(server: Server) {.thread.} =
   defer:
     info "server is closed"
     server.sock.close()
-    for client in server.clientList:
-      client.close()
-    server.clientList.setLen(0)
+    when not defined(pool):
+      for client in server.clientList:
+        client.close()
+      server.clientList.setLen(0)
 
   while true:
-    server.clientList = server.clientList.filterIt(it.runThread.running())
-    info fmt"{server.clientList.len=}"
+    when not defined(pool):
+      server.clientList = server.clientList.filterIt(it.runThread.running())
+      info fmt"{server.clientList.len=}"
     {.gcsafe.}:
       var client = Client(config: config.client, id: genOid())
     server.sock.accept(client.sock)
     client.address = client.sock.getPeerAddr()
-    server.clientList.add(client)
-    createThread(client.runThread, handleClient, client)
+    when defined(pool):
+      spawn handleClient(client)
+    else:
+      server.clientList.add(client)
+      createThread(client.runThread, handleClient, client)
 
 proc startAndWait(server: Server) =
-  # start proxy server and wait for it finished
+  ## start proxy server and wait for it finished
+
   createThread(server.runThread, start, server)
   joinThread(server.runThread)
 
+# === Main ===
+
+when defined(pool):
+  init(Weave)
+
 var server = Server(config: config.server)
 server.startAndWait()
+
+when defined(pool):
+  exit(Weave)

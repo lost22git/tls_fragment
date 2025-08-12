@@ -1,4 +1,4 @@
-import std/[strformat, net, logging, exitprocs, random, algorithm, strutils]
+import std/[strformat, net, logging, exitprocs, random, strutils]
 
 func be16*(data: openArray[char]): uint16 =
   ## big endian decode
