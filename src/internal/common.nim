@@ -138,7 +138,7 @@ proc fragmentizeTlsClientHello*(
     f.add range.len.be16
     f.add data[range]
     result.add f
-  for range in randomSlice(l .. r, minLen = 10):
+  for range in randomSlice(l .. r, minLen = 4):
     var f = ""
     f.add recordHeader
     f.add range.len.be16
@@ -174,7 +174,7 @@ else:
 # === Logging ===
 
 let logger* =
-  newConsoleLogger(fmtStr = "$levelId$datetime - ", levelThreshold = config.logLevel)
+  newConsoleLogger(fmtStr = "$levelId$datetime| ", levelThreshold = config.logLevel)
 
 addHandler(logger)
 
