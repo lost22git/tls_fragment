@@ -217,6 +217,7 @@ proc handleTlsClientHello(client: Client) {.async.} =
 
   # send fragmentList
   for fragment in fragmentList:
+    await sleepAsync 10
     await client.remoteSock.send(fragment)
 
 proc upstreaming(client: Client) {.async.} =
@@ -268,12 +269,12 @@ proc handleClient(client: Client) {.async.} =
     info client, ": ", "client is closed"
     client.close()
 
-  # 1. proxy protocol handshake
+  # 1. proxy handshake
   var remoteAddress: (string, uint16)
   try:
     remoteAddress = await proxyHandshake(client.sock)
   except Exception as e:
-    error client, ": ", fmt"proxy protocol handshake error: err={e.msg}"
+    error client, ": ", fmt"proxy handshake error: err={e.msg}"
     return
 
   assert remoteAddress != default((string, uint16))
