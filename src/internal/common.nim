@@ -131,25 +131,25 @@ proc fragmentizeTlsClientHello*(
   let l = data.find(sni)
   let r = l + sni.len - 1
 
+  var tcpData = ""
+
   # tls fragmentize
-  for range in randomSlice(0 ..< l, minLen = 10):
-    var f = ""
-    f.add recordHeader
-    f.add range.len.be16
-    f.add data[range]
-    result.add f
+  for range in randomSlice(0 ..< l, minLen = 8):
+    tcpData.add recordHeader
+    tcpData.add range.len.be16
+    tcpData.add data[range]
   for range in randomSlice(l .. r, minLen = 4):
-    var f = ""
-    f.add recordHeader
-    f.add range.len.be16
-    f.add data[range]
-    result.add f
-  for range in randomSlice((r + 1) .. data.high, minLen = 10):
-    var f = ""
-    f.add recordHeader
-    f.add range.len.be16
-    f.add data[range]
-    result.add f
+    tcpData.add recordHeader
+    tcpData.add range.len.be16
+    tcpData.add data[range]
+  for range in randomSlice((r + 1) .. data.high, minLen = 8):
+    tcpData.add recordHeader
+    tcpData.add range.len.be16
+    tcpData.add data[range]
+
+  # tcp fragmentize
+  for range in randomSlice(0 .. tcpData.high, 4):
+    result.add tcpData[range]
 
 # === Config ===
 

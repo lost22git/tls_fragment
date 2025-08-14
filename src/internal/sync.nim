@@ -23,7 +23,7 @@ proc guessProxyProtocol(client: Socket): ProxyProtocol =
       return Http
   return Unknown
 
-proc socks5ExtractServerAddr(client: Socket): (string, uint16) =
+proc socks5ProxyExtractServerAddr(client: Socket): (string, uint16) =
   ## extract remote server address from socks5 proxy handshake
 
   let addrType = client.recv(1)[0].int
@@ -48,7 +48,7 @@ proc socks5ExtractServerAddr(client: Socket): (string, uint16) =
   else:
     return
 
-proc socks5Handshake(client: Socket): (string, uint16) =
+proc socks5ProxyHandshake(client: Socket): (string, uint16) =
   ## handle socks5 proxy handshake
   ##
   ## https://en.m.wikipedia.org/wiki/SOCKS
@@ -62,7 +62,7 @@ proc socks5Handshake(client: Socket): (string, uint16) =
   let nauth = client.recv(1)[0].int
   discard client.recv(nauth)
   client.send("\x05\x00") # no auth
-  info clientAddr, ": ", fmt"socks5 handshake: auth=0x00(no auth)"
+  info clientAddr, ": ", fmt"socks5 proxy handshake: auth=0x00(no auth)"
 
   # 2. auth requeset (skip when no auth)
 
@@ -76,20 +76,21 @@ proc socks5Handshake(client: Socket): (string, uint16) =
     let serverAddr = socks5ExtractServerAddr(client)
     if serverAddr == default((string, uint16)):
       client.send("\x05\x08\x00\x01\x00\x00\x00\x00\x00\x00")
-      raise
-        newException(ValueError, "socks5 handshake error: address type not supported")
+      raise newException(
+        ValueError, "socks5 proxy handshake error: address type not supported"
+      )
     else:
-      info clientAddr, ": ", fmt"socks5 handshake: {serverAddr=}"
+      info clientAddr, ": ", fmt"socks5 proxy handshake: {serverAddr=}"
       client.send("\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
       return serverAddr
   else:
     client.send("\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00")
     raise newException(
       ValueError,
-      fmt"socks5 handshake error: command({cmd}) not supported / protocol error",
+      fmt"socks5 proxy handshake error: command({cmd}) not supported / protocol error",
     )
 
-proc httpExtractServerAddr(client: Socket): (string, uint16) =
+proc httpProxyExtractServerAddr(client: Socket): (string, uint16) =
   ## extract remote server address from http proxy handshake
   ##
   ## NOTE:
@@ -105,20 +106,20 @@ proc httpExtractServerAddr(client: Socket): (string, uint16) =
       let split = line[6 ..^ 1].split(":")
       result = (split[0], split[1].parseInt().uint16)
 
-proc httpHandshake(client: Socket): (string, uint16) =
+proc httpProxyHandshake(client: Socket): (string, uint16) =
   ## handle http proxy handshake
 
   let clientAddr = client.getPeerAddr()
-  let serverAddr = httpExtractServerAddr(client)
+  let serverAddr = httpProxyExtractServerAddr(client)
   if serverAddr == default((string, uint16)):
     client.send("HTTP/1.1 400 Bad Request\r\nProxy-agent: MyProxy/1.0\r\n\r\n")
-    raise newException(ValueError, "http handshake error: serverAddr not found")
-  info clientAddr, ": ", fmt"http handshake: {serverAddr=}"
+    raise newException(ValueError, "http proxy handshake error: serverAddr not found")
+  info clientAddr, ": ", fmt"http proxy handshake: {serverAddr=}"
   client.send("HTTP/1.1 200 Connection established\r\nProxy-agent: MyProxy/1.0\r\n\r\n")
   return serverAddr
 
-proc proxyProtocolHandshake(client: Socket): (string, uint16) =
-  ## handle proxy protocol handshake
+proc proxyHandshake(client: Socket): (string, uint16) =
+  ## handle proxy handshake
   ##
   ## supported proxy protocols:
   ## 1. http
@@ -126,9 +127,9 @@ proc proxyProtocolHandshake(client: Socket): (string, uint16) =
 
   case guessProxyProtocol(client)
   of Http:
-    result = httpHandshake(client)
+    result = httpProxyHandshake(client)
   of Socks5:
-    result = socks5Handshake(client)
+    result = socks5ProxyHandshake(client)
   of Unknown:
     raise newException(ValueError, "unknown proxy protocol")
 
@@ -271,14 +272,14 @@ proc streaming(client: Client) =
   ## 1. spawn a thread to downstreaming
   ## 2. upstreaming
 
-  info client, ": ", "spawn to downstreaming"
+  debug client, ": ", "spawn to downstreaming"
   when defined(pool):
     spawn downstreamingThreadProc(client)
   else:
     createThread(client.downstreamThread, downstreamingThreadProc, client)
 
   try:
-    info client, ": ", "upstreaming"
+    debug client, ": ", "upstreaming"
     client.upstreaming()
   except Exception as e:
     if e.msg == "Bad file descriptor":
@@ -307,7 +308,7 @@ proc handleClient(client: Client) {.thread.} =
   # 1. proxy protocol handshake
   var remoteAddress: (string, uint16)
   try:
-    remoteAddress = proxyProtocolHandshake(client.sock)
+    remoteAddress = proxyHandshake(client.sock)
   except Exception as e:
     error client, ": ", fmt"proxy protocol handshake error: err={e.msg}"
     return

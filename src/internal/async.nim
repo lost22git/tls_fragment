@@ -1,5 +1,6 @@
 import std/[strformat, strutils, net, asyncnet, asyncdispatch, logging, oids]
 import ./common
+import ./asyncdoh
 
 echo "=== ASYNC ==="
 
@@ -17,7 +18,9 @@ proc guessProxyProtocol(client: AsyncSocket): Future[ProxyProtocol] {.async.} =
       return Http
   return Unknown
 
-proc socks5ExtractServerAddr(client: AsyncSocket): Future[(string, uint16)] {.async.} =
+proc socks5ProxyExtractServerAddr(
+    client: AsyncSocket
+): Future[(string, uint16)] {.async.} =
   ## extract remote server address from socks5 proxy handshake
 
   let addrType = (await client.recv(1))[0].int
@@ -42,7 +45,7 @@ proc socks5ExtractServerAddr(client: AsyncSocket): Future[(string, uint16)] {.as
   else:
     return
 
-proc socks5Handshake(client: AsyncSocket): Future[(string, uint16)] {.async.} =
+proc socks5ProxyHandshake(client: AsyncSocket): Future[(string, uint16)] {.async.} =
   ## handle socks5 proxy handshake
   ##
   ## https://en.m.wikipedia.org/wiki/SOCKS
@@ -56,7 +59,7 @@ proc socks5Handshake(client: AsyncSocket): Future[(string, uint16)] {.async.} =
   let nauth = (await client.recv(1))[0].int
   discard await client.recv(nauth)
   await client.send("\x05\x00") # no auth
-  info clientAddr, ": ", fmt"socks5 handshake: auth=0x00(no auth)"
+  info clientAddr, ": ", fmt"socks5 proxy handshake: auth=0x00(no auth)"
 
   # 2. auth requeset (skip when no auth)
 
@@ -70,20 +73,23 @@ proc socks5Handshake(client: AsyncSocket): Future[(string, uint16)] {.async.} =
     let serverAddr = await socks5ExtractServerAddr(client)
     if serverAddr == default((string, uint16)):
       await client.send("\x05\x08\x00\x01\x00\x00\x00\x00\x00\x00")
-      raise
-        newException(ValueError, "socks5 handshake error: address type not supported")
+      raise newException(
+        ValueError, "socks5 proxy handshake error: address type not supported"
+      )
     else:
-      info clientAddr, ": ", fmt"socks5 handshake: {serverAddr=}"
+      info clientAddr, ": ", fmt"socks5 proxy handshake: {serverAddr=}"
       await client.send("\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
       return serverAddr
   else:
     await client.send("\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00")
     raise newException(
       ValueError,
-      fmt"socks5 handshake error: command({cmd}) not supported / protocol error",
+      fmt"socks5 proxy handshake error: command({cmd}) not supported / protocol error",
     )
 
-proc httpExtractServerAddr(client: AsyncSocket): Future[(string, uint16)] {.async.} =
+proc httpProxyExtractServerAddr(
+    client: AsyncSocket
+): Future[(string, uint16)] {.async.} =
   ## extract remote server address from http proxy handshake
   ##
   ## NOTE:
@@ -99,22 +105,22 @@ proc httpExtractServerAddr(client: AsyncSocket): Future[(string, uint16)] {.asyn
       let split = line[6 ..^ 1].split(":")
       result = (split[0], split[1].parseInt().uint16)
 
-proc httpHandshake(client: AsyncSocket): Future[(string, uint16)] {.async.} =
+proc httpProxyHandshake(client: AsyncSocket): Future[(string, uint16)] {.async.} =
   ## handle http proxy handshake
 
   let clientAddr = client.getPeerAddr()
-  let serverAddr = await httpExtractServerAddr(client)
+  let serverAddr = await httpProxyExtractServerAddr(client)
   if serverAddr == default((string, uint16)):
     await client.send("HTTP/1.1 400 Bad Request\r\nProxy-agent: MyProxy/1.0\r\n\r\n")
-    raise newException(ValueError, "http handshake error: serverAddr not found")
-  info clientAddr, ": ", fmt"http handshake: {serverAddr=}"
+    raise newException(ValueError, "http proxy handshake error: serverAddr not found")
+  info clientAddr, ": ", fmt"http proxy handshake: {serverAddr=}"
   await client.send(
     "HTTP/1.1 200 Connection established\r\nProxy-agent: MyProxy/1.0\r\n\r\n"
   )
   return serverAddr
 
-proc proxyProtocolHandshake(client: AsyncSocket): Future[(string, uint16)] {.async.} =
-  ## handle proxy protocol handshake
+proc proxyHandshake(client: AsyncSocket): Future[(string, uint16)] {.async.} =
+  ## handle proxy handshake
   ##
   ## supported proxy protocols:
   ## 1. http
@@ -122,9 +128,9 @@ proc proxyProtocolHandshake(client: AsyncSocket): Future[(string, uint16)] {.asy
 
   case await guessProxyProtocol(client)
   of Http:
-    result = await httpHandshake(client)
+    result = await httpProxyHandshake(client)
   of Socks5:
-    result = await socks5Handshake(client)
+    result = await socks5ProxyHandshake(client)
   of Unknown:
     raise newException(ValueError, "unknown proxy protocol")
 
@@ -137,6 +143,7 @@ type Client = ref object
   remoteSock: AsyncSocket
   address: (string, uint16)
   remoteAddress: (string, uint16)
+  doh: Doh
 
 func `$`(client: Client): string =
   return
@@ -155,13 +162,17 @@ proc close(client: Client) =
 
 proc connectRemote(client: Client, remoteAddress: (string, uint16)) {.async.} =
   ## connect to remote
-  ##
-  ## TODO:
-  ## 1. doh resolve remoteAddress to avoid dns hijack
 
+  # resolve ip via DoH
+  let host = await client.doh.resolve(remoteAddress[0])
+  info client, ": ", fmt"DoH resolved: {remoteAddress[0]} -> {host}"
+
+  # connect remote
   let remoteSock = newAsyncSocket(buffered = false)
-  let (host, port) = remoteAddress
-  await remoteSock.connect(host, port.Port)
+  remoteSock.setSockOpt(OptNoDelay, true, level = IPPROTO_TCP.cint)
+  await remoteSock.connect(host, 443.Port)
+
+  # bind info to client
   client.remoteAddress = remoteAddress
   client.remoteSock = remoteSock
 
@@ -256,11 +267,11 @@ proc streaming(client: Client) {.async.} =
   ## 1. spawn a thread to downstreaming
   ## 2. upstreaming
 
-  info client, ": ", "spawn downstreaming"
+  debug client, ": ", "spawn downstreaming"
   asyncCheck downstreamingThreadProc(client)
 
   try:
-    info client, ": ", "upstreaming"
+    debug client, ": ", "upstreaming"
     await client.upstreaming()
   except Exception as e:
     if e.msg == "Bad file descriptor":
@@ -284,7 +295,7 @@ proc handleClient(client: Client) {.async.} =
   # 1. proxy protocol handshake
   var remoteAddress: (string, uint16)
   try:
-    remoteAddress = await proxyProtocolHandshake(client.sock)
+    remoteAddress = await proxyHandshake(client.sock)
   except Exception as e:
     error client, ": ", fmt"proxy protocol handshake error: err={e.msg}"
     return
@@ -329,6 +340,8 @@ proc start(server: Server) {.async.} =
 
   info fmt"server is listening at {server.sock.getLocalAddr()}"
 
+  let doh = newDoh(proxyUrl = fmt"http://{server.config.host}:{server.config.port}")
+
   defer:
     info "server is closed"
     server.sock.close()
@@ -339,6 +352,7 @@ proc start(server: Server) {.async.} =
     let clientSock = await server.sock.accept()
     client.sock = clientSock
     client.address = client.sock.getPeerAddr()
+    client.doh = doh
     asyncCheck handleClient(client)
 
 # === Main ===
