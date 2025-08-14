@@ -70,7 +70,7 @@ proc socks5ProxyHandshake(client: AsyncSocket): Future[(string, uint16)] {.async
   let cmd = header[1].int
   case cmd
   of 0x01: # establish a TCP/IP stream connection
-    let serverAddr = await socks5ExtractServerAddr(client)
+    let serverAddr = await socks5ProxyExtractServerAddr(client)
     if serverAddr == default((string, uint16)):
       await client.send("\x05\x08\x00\x01\x00\x00\x00\x00\x00\x00")
       raise newException(
@@ -212,7 +212,7 @@ proc handleTlsClientHello(client: Client) {.async.} =
   info client, ": ", fmt"{sni=}"
 
   # fragmentize TLS client hello
-  let fragmentList = fragmentizeTlsClientHello(handshakeData, sni, recordHeader[..2])
+  let fragmentList = fragmentizeTlsClientHello(handshakeData, sni, recordHeader[0 .. 2])
   info client, ": ", fmt"send TLS client hello, {fragmentList.len=}"
 
   # send fragmentList
@@ -226,7 +226,7 @@ proc upstreaming(client: Client) {.async.} =
   while true:
     if tlsClientHello:
       tlsClientHello = false
-      info client, ": ", "handling TLS client hello"
+      info client, ": ", "TLS client hello"
       await client.handleTlsClientHello()
     else:
       let data = await client.sock.recv(16384)
@@ -255,36 +255,12 @@ proc downstreamingThreadProc(client: Client) {.async.} =
   try:
     await client.downstreaming()
   except Exception as e:
-    if e.msg == "Bad file descriptor":
-      return
-    error client, ": ", fmt"downstream error: err={e.msg}"
+    if e.msg != "Bad file descriptor":
+      error client, ": ", fmt"downstream error: err={e.msg}"
     client.close()
-
-proc streaming(client: Client) {.async.} =
-  ## client streaming
-  ##
-  ## main steps:
-  ## 1. spawn a thread to downstreaming
-  ## 2. upstreaming
-
-  debug client, ": ", "spawn downstreaming"
-  asyncCheck downstreamingThreadProc(client)
-
-  try:
-    debug client, ": ", "upstreaming"
-    await client.upstreaming()
-  except Exception as e:
-    if e.msg == "Bad file descriptor":
-      return
-    raise newException(ValueError, fmt"upstream error: err={e.msg}")
 
 proc handleClient(client: Client) {.async.} =
   ## handle a new client
-  ##
-  ## main steps:
-  ## 1. handle proxy protocol handshake to get remote server address
-  ## 2. connect to remote server address
-  ## 3. client streaming
 
   info client, ": ", "client is connected"
 
@@ -310,11 +286,21 @@ proc handleClient(client: Client) {.async.} =
     error client, ": ", fmt"connect remote server error: err={e.msg}"
     return
 
-  # 3. client streaming
+  # 3. spawn downstreaming
   try:
-    await client.streaming()
+    debug client, ": ", "spawn downstreaming"
+    asyncCheck downstreamingThreadProc(client)
   except Exception as e:
-    error client, ": ", fmt"streaming error: err={e.msg}"
+    error client, ": ", fmt"failed to spawn downstreaming, err={e.msg}"
+    return
+
+  # 4. upstreaming
+  try:
+    debug client, ": ", "upstreaming"
+    await client.upstreaming()
+  except Exception as e:
+    if e.msg != "Bad file descriptor":
+      error client, ": ", fmt"upstream error: err={e.msg}"
     return
 
 # === Server ===

@@ -1,4 +1,4 @@
-import std/[asyncdispatch, httpclient, json, strutils, strformat, sequtils]
+import std/[asyncdispatch, httpclient, json, strutils, strformat, sequtils, logging]
 
 type Doh* = ref object
   proxy: Proxy
@@ -36,5 +36,5 @@ proc resolveFromRemote*(
 proc resolve*(doh: Doh, qDomain: string): Future[string] {.async.} =
   if qDomain in ["cloudflare-dns.com", "one.one.one.one"]:
     return "104.16.249.249"
-  let (ip, ttl) = await resolveFromRemote(doh, qDomain, qType)
+  let (ip, ttl) = await resolveFromRemote(doh, qDomain, "A")
   return ip

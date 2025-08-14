@@ -73,7 +73,7 @@ proc socks5ProxyHandshake(client: Socket): (string, uint16) =
   let cmd = header[1].int
   case cmd
   of 0x01: # establish a TCP/IP stream connection
-    let serverAddr = socks5ExtractServerAddr(client)
+    let serverAddr = socks5ProxyExtractServerAddr(client)
     if serverAddr == default((string, uint16)):
       client.send("\x05\x08\x00\x01\x00\x00\x00\x00\x00\x00")
       raise newException(
@@ -226,7 +226,7 @@ proc upstreaming(client: Client) =
   while true:
     if tlsClientHello:
       tlsClientHello = false
-      info client, ": ", "handling TLS client hello"
+      info client, ": ", "TLS client hello"
       client.handleTlsClientHello()
     else:
       let data = client.sock.recv(16384)
@@ -260,39 +260,12 @@ proc downstreamingThreadProc(client: Client) {.thread.} =
   try:
     client.downstreaming()
   except Exception as e:
-    if e.msg == "Bad file descriptor":
-      return
-    error client, ": ", fmt"downstream error: err={e.msg}"
+    if e.msg != "Bad file descriptor":
+      error client, ": ", fmt"downstream error: err={e.msg}"
     client.close()
-
-proc streaming(client: Client) =
-  ## client streaming
-  ##
-  ## main steps:
-  ## 1. spawn a thread to downstreaming
-  ## 2. upstreaming
-
-  debug client, ": ", "spawn to downstreaming"
-  when defined(pool):
-    spawn downstreamingThreadProc(client)
-  else:
-    createThread(client.downstreamThread, downstreamingThreadProc, client)
-
-  try:
-    debug client, ": ", "upstreaming"
-    client.upstreaming()
-  except Exception as e:
-    if e.msg == "Bad file descriptor":
-      return
-    raise newException(ValueError, fmt"upstream error: err={e.msg}")
 
 proc handleClient(client: Client) {.thread.} =
   ## handle a new client
-  ##
-  ## main steps:
-  ## 1. handle proxy protocol handshake to get remote server address
-  ## 2. connect to remote server address
-  ## 3. client streaming
 
   {.gcsafe.}:
     addHandler(logger)
@@ -323,11 +296,24 @@ proc handleClient(client: Client) {.thread.} =
     error client, ": ", fmt"connect remote server error: err={e.msg}"
     return
 
-  # 3. client streaming
+  # 3. spawn downstreaming
   try:
-    client.streaming()
+    debug client, ": ", "spawn downstreaming"
+    when defined(pool):
+      spawn downstreamingThreadProc(client)
+    else:
+      createThread(client.downstreamThread, downstreamingThreadProc, client)
   except Exception as e:
-    error client, ": ", fmt"streaming error: err={e.msg}"
+    error client, ": ", fmt"failed to spawn downstreaming, err={e.msg}"
+    return
+
+  # 4. upstreaming
+  try:
+    debug client, ": ", "upstreaming"
+    client.upstreaming()
+  except Exception as e:
+    if e.msg != "Bad file descriptor":
+      error client, ": ", fmt"upstream error: err={e.msg}"
     return
 
 # === Server ===
