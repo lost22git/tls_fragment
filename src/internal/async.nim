@@ -164,8 +164,13 @@ proc connectRemote(client: Client, remoteAddress: (string, uint16)) {.async.} =
   ## connect to remote
 
   # resolve ip via DoH
-  let host = await client.doh.resolve(remoteAddress[0])
-  info client, ": ", fmt"DoH resolved: {remoteAddress[0]} -> {host}"
+  var host = ""
+  let domain = remoteAddress[0]
+  try:
+    host = await client.doh.resolve(domain)
+    info client, ": ", fmt"DoH resolved: {domain} -> {host}"
+  except Exception as e:
+    raise newException(ValueError, fmt"DoH resolve error, {domain=}, err={e.msg}")
 
   # connect remote
   let remoteSock = newAsyncSocket(buffered = false)
