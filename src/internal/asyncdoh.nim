@@ -11,7 +11,7 @@ type Cache = ref object
   loader: CacheLoader
   loadingFutTab: TableRef[string, Future[void]]
 
-proc newCache*(loader: CacheLoader): Cache =
+proc newCache(loader: CacheLoader): Cache =
   result = Cache(
     tab: newStringTable(modeCaseInsensitive),
     loader: loader,
@@ -27,17 +27,17 @@ proc get(cache: Cache, key: string): Future[string] {.async.} =
   if cache.loadingFutTab.contains(key):
     await cache.loadingFutTab[key]
     return await cache.get(key)
-  else:
-    let loadingFut = newFuture[void]("DoH cache loading future: key=" & $key)
-    cache.loadingFutTab[key] = loadingFut
-    try:
-      debug fmt"DoH cache loading: {key}"
-      let value = await cache.loader(key)
-      cache.tab[key] = value
-      return value
-    finally:
-      cache.loadingFutTab.del key
-      loadingFut.complete()
+
+  let loadingFut = newFuture[void]("DoH cache loading future: key=" & $key)
+  cache.loadingFutTab[key] = loadingFut
+  try:
+    debug fmt"DoH cache loading: {key}"
+    let value = await cache.loader(key)
+    cache.tab[key] = value
+    return value
+  finally:
+    loadingFut.complete()
+    cache.loadingFutTab.del key
 
 proc del(cache: Cache, key: string) =
   cache.tab.del key
@@ -75,14 +75,6 @@ proc resolveViaRemote(
   let exp = getTime().toUnix() + firstAnswer["TTL"].getInt - 10 # expires 10s in advance
   return $ip & "/" & $exp
 
-proc newDoh*(proxyUrl: string): Doh =
-  let doh = Doh(proxy: newProxy(url = proxyUrl))
-  doh.cache = newCache(
-    loader = proc(qDomain: string): Future[string] {.async, closure.} =
-      return await doh.resolveViaRemote(qDomain, "A")
-  )
-  return doh
-
 proc resolveViaCache(doh: Doh, qDomain: string): Future[string] {.async.} =
   let value = await doh.cache.get(qDomain)
   let ipAndExp = split(value, "/")
@@ -92,6 +84,14 @@ proc resolveViaCache(doh: Doh, qDomain: string): Future[string] {.async.} =
     info fmt"DoH resolved via cache failed, maybe expired, trying resolve via remote {qDomain=}"
     return await resolveViaCache(doh, qDomain)
   return ip
+
+proc newDoh*(proxyUrl: string): Doh =
+  let doh = Doh(proxy: newProxy(url = proxyUrl))
+  doh.cache = newCache(
+    loader = proc(qDomain: string): Future[string] {.async, closure.} =
+      return await doh.resolveViaRemote(qDomain, "A")
+  )
+  return doh
 
 proc resolve*(doh: Doh, qDomain: string): Future[string] {.async.} =
   if qDomain in ["cloudflare-dns.com", "one.one.one.one"]:

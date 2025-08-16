@@ -354,8 +354,7 @@ proc start(server: Server) {.async.} =
     server.sock.close()
 
   while true:
-    {.gcsafe.}:
-      var client = Client(config: config.client, id: genOid())
+    var client = Client(config: config.client, id: genOid())
     let clientSock = await server.sock.accept()
     client.sock = clientSock
     client.address = client.sock.getPeerAddr()
