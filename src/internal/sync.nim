@@ -282,7 +282,7 @@ proc handleClient(client: Client) {.thread.} =
     info client, ": ", fmt"connect remote server {remoteAddress}"
     client.connectRemote(remoteAddress)
   except Exception as e:
-    error client, ": ", fmt"connect remote server error: err={e.msg}"
+    error client, ": ", fmt"connect remote server error: {remoteAddress}, err={e.msg}"
     return
 
   # 3. handle tls client hello
