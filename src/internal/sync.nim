@@ -218,23 +218,14 @@ proc handleTlsClientHello(client: Client) =
 
 proc upstreaming(client: Client) =
   ## upstreaming
-  ##
-  ## TODO:
-  ## 1. tls fragment to avoid exposing sni on tls handshake
 
-  var tlsClientHello = true
   while true:
-    if tlsClientHello:
-      tlsClientHello = false
-      info client, ": ", "TLS client hello"
-      client.handleTlsClientHello()
-    else:
-      let data = client.sock.recv(16384)
-      if data == "":
-        raise newException(ValueError, "upstream data is EOF (client is disconnected)")
-      debug client, ": ", fmt"upstream {data.len=}"
-      debug client, ": ", fmt"upstream {data=}"
-      client.remoteSock.send(data)
+    let data = client.sock.recv(16384)
+    if data == "":
+      raise newException(ValueError, "upstream data is EOF (client is disconnected)")
+    debug client, ": ", fmt"upstream {data.len=}"
+    debug client, ": ", fmt"upstream {data=}"
+    client.remoteSock.send(data)
 
 proc downstreaming(client: Client) =
   ## downstreaming
@@ -272,8 +263,6 @@ proc handleClient(client: Client) {.thread.} =
     when defined(pool):
       removeHandler(logger)
 
-  info client, ": ", "client is connected"
-
   defer:
     info client, ": ", "client is closed"
     client.close()
@@ -296,7 +285,15 @@ proc handleClient(client: Client) {.thread.} =
     error client, ": ", fmt"connect remote server error: err={e.msg}"
     return
 
-  # 3. spawn downstreaming
+  # 3. handle tls client hello
+  try:
+    info client, ": ", "TLS client hello"
+    client.handleTlsClientHello()
+  except Exception as e:
+    error client, ": ", fmt"TLS client hello error, err={e.msg}"
+    return
+
+  # 4. spawn downstreaming
   try:
     debug client, ": ", "spawn downstreaming"
     when defined(pool):
@@ -307,7 +304,7 @@ proc handleClient(client: Client) {.thread.} =
     error client, ": ", fmt"failed to spawn downstreaming, err={e.msg}"
     return
 
-  # 4. upstreaming
+  # 5. upstreaming
   try:
     debug client, ": ", "upstreaming"
     client.upstreaming()

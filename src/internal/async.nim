@@ -228,19 +228,13 @@ proc handleTlsClientHello(client: Client) {.async.} =
 proc upstreaming(client: Client) {.async.} =
   ## upstreaming
 
-  var tlsClientHello = true
   while true:
-    if tlsClientHello:
-      tlsClientHello = false
-      info client, ": ", "TLS client hello"
-      await client.handleTlsClientHello()
-    else:
-      let data = await client.sock.recv(16384)
-      if data == "":
-        raise newException(ValueError, "upstream data is EOF (client is disconnected)")
-      debug client, ": ", fmt"upstream {data.len=}"
-      debug client, ": ", fmt"upstream {data=}"
-      await client.remoteSock.send(data)
+    let data = await client.sock.recv(16384)
+    if data == "":
+      raise newException(ValueError, "upstream data is EOF (client is disconnected)")
+    debug client, ": ", fmt"upstream {data.len=}"
+    debug client, ": ", fmt"upstream {data=}"
+    await client.remoteSock.send(data)
 
 proc downstreaming(client: Client) {.async.} =
   ## downstreaming
@@ -268,8 +262,6 @@ proc downstreamingThreadProc(client: Client) {.async.} =
 proc handleClient(client: Client) {.async.} =
   ## handle a new client
 
-  info client, ": ", "client is connected"
-
   defer:
     info client, ": ", "client is closed"
     client.close()
@@ -292,7 +284,15 @@ proc handleClient(client: Client) {.async.} =
     error client, ": ", fmt"connect remote server error: err={e.msg}"
     return
 
-  # 3. spawn downstreaming
+  # 3. handle tls hello
+  try:
+    info client, ": ", "TLS client hello"
+    await client.handleTlsClientHello()
+  except Exception as e:
+    error client, ": ", fmt"TLS client hello error, err={e.msg}"
+    return
+
+  # 4. spawn downstreaming
   try:
     debug client, ": ", "spawn downstreaming"
     asyncCheck downstreamingThreadProc(client)
@@ -300,7 +300,7 @@ proc handleClient(client: Client) {.async.} =
     error client, ": ", fmt"failed to spawn downstreaming, err={e.msg}"
     return
 
-  # 4. upstreaming
+  # 5. upstreaming
   try:
     debug client, ": ", "upstreaming"
     await client.upstreaming()
