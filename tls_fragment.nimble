@@ -20,4 +20,4 @@ task buildPool, "build thread pool version":
   exec "nimble build --verbose -d:release -d:lto -d:ssl --mm:atomicArc -d:pool"
 
 task buildAsync, "build async version":
-  exec "nimble build --verbose -d:release -d:lto -d:ssl -d:async"
+  exec "nimble build --verbose -d:release -d:lto -d:ssl --threads:off -d:async"

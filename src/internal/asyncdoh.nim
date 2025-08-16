@@ -7,15 +7,15 @@ import
 type CacheLoader = proc(k: string): Future[string] {.async, closure.}
 
 type Cache = ref object
-  tab: StringTableRef
-  loader: CacheLoader # loader to load value by key when key not found in tab
-  nfutTab: TableRef[string, Future[void]] # table to store key-notifyfuture
+  tab: StringTableRef # store domain -> ip/expiredTime
+  loader: CacheLoader
+  loadingFutTab: TableRef[string, Future[void]]
 
 proc newCache*(loader: CacheLoader): Cache =
   result = Cache(
     tab: newStringTable(modeCaseInsensitive),
     loader: loader,
-    nfutTab: newTable[string, Future[void]](),
+    loadingFutTab: newTable[string, Future[void]](),
   )
 
 proc get(cache: Cache, key: string): Future[string] {.async.} =
@@ -24,20 +24,20 @@ proc get(cache: Cache, key: string): Future[string] {.async.} =
     debug fmt"DoH cache hit: {key} -> {value}"
     return value
 
-  if cache.nfutTab.contains(key):
-    await cache.nfutTab[key]
+  if cache.loadingFutTab.contains(key):
+    await cache.loadingFutTab[key]
     return await cache.get(key)
   else:
-    let nfut = newFuture[void]("DoH cache notify future: key=" & $key)
-    cache.nfutTab[key] = nfut
+    let loadingFut = newFuture[void]("DoH cache loading future: key=" & $key)
+    cache.loadingFutTab[key] = loadingFut
     try:
       debug fmt"DoH cache loading: {key}"
       let value = await cache.loader(key)
       cache.tab[key] = value
       return value
     finally:
-      cache.nfutTab.del key
-      nfut.complete()
+      cache.loadingFutTab.del key
+      loadingFut.complete()
 
 proc del(cache: Cache, key: string) =
   cache.tab.del key
@@ -63,7 +63,7 @@ proc resolveViaRemote(
     headers = newHttpHeaders({"Accept": "application/dns-json"}),
   )
   let data = await response.body()
-  debug fmt"DoH resolve via remote: response {data=}"
+  debug fmt"DoH resolve via remote: {qDomain=}, response {data=}"
 
   let jsonObj = parseJson(data)
   let answerList = jsonObj["Answer"]
@@ -72,7 +72,7 @@ proc resolveViaRemote(
 
   let firstAnswer = ipAnswerList[0]
   let ip = firstAnswer["data"].getStr
-  let exp = getTime().toUnix() + firstAnswer["TTL"].getInt - 10
+  let exp = getTime().toUnix() + firstAnswer["TTL"].getInt - 10 # expires 10s in advance
   return $ip & "/" & $exp
 
 proc newDoh*(proxyUrl: string): Doh =
