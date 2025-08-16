@@ -17,6 +17,5 @@
 
 TODO:
 1. rules: denylist/directlist, doh or not, tls fragment or not
-2. no proxy handshake
-3. domain fronting
+2. domain fronting
 

@@ -4,136 +4,6 @@ import ./asyncdoh
 
 echo "=== ASYNC ==="
 
-# === Proxy Protocol Handshake ===
-
-proc guessProxyProtocol(client: AsyncSocket): Future[ProxyProtocol] {.async.} =
-  ## guess proxy protocol
-
-  var data = await client.recv(1)
-  if data[0].int == 0x05:
-    return Socks5
-  if data[0] == 'C':
-    data = await client.recv(6)
-    if data == "ONNECT":
-      return Http
-  return Unknown
-
-proc socks5ProxyExtractServerAddr(
-    client: AsyncSocket
-): Future[(string, uint16)] {.async.} =
-  ## extract remote server address from socks5 proxy handshake
-
-  let addrType = (await client.recv(1))[0].int
-  case addrType
-  of 0x01: # IPV4
-    var data: array[0 .. 3, uint8]
-    discard await client.recvInto(data.addr, 4)
-    let ipv4 = IpAddress(family: IPv4, address_v4: data)
-    let port = (await client.recv(2)).be16()
-    result = ($ipv4, port)
-  of 0x03: # Domain name (len(1B)+name)
-    let len = (await client.recv(1))[0].int
-    let domain = await client.recv(len)
-    let port = (await client.recv(2)).be16()
-    result = (domain, port)
-  of 0x04: # IPV6
-    var data: array[0 .. 15, uint8]
-    discard await client.recvInto(data.addr, 16)
-    let ipv6 = IpAddress(family: IPv6, address_v6: data)
-    let port = (await client.recv(2)).be16()
-    result = ($ipv6, port)
-  else:
-    return
-
-proc socks5ProxyHandshake(client: AsyncSocket): Future[(string, uint16)] {.async.} =
-  ## handle socks5 proxy handshake
-  ##
-  ## https://en.m.wikipedia.org/wiki/SOCKS
-  ##
-  ## NOTE:
-  ## we only support tcp and no auth now.
-
-  let clientAddr = client.getPeerAddr()
-
-  # 1. initial request
-  let nauth = (await client.recv(1))[0].int
-  discard await client.recv(nauth)
-  await client.send("\x05\x00") # no auth
-  info clientAddr, ": ", fmt"socks5 proxy handshake: auth=0x00(no auth)"
-
-  # 2. auth requeset (skip when no auth)
-
-  # 3. client connection request
-  let header = await client.recv(3)
-  # echo fmt"{header.repr =}"
-  assert header[0].int == 0x05
-  let cmd = header[1].int
-  case cmd
-  of 0x01: # establish a TCP/IP stream connection
-    let serverAddr = await socks5ProxyExtractServerAddr(client)
-    if serverAddr == default((string, uint16)):
-      await client.send("\x05\x08\x00\x01\x00\x00\x00\x00\x00\x00")
-      raise newException(
-        ValueError, "socks5 proxy handshake error: address type not supported"
-      )
-    else:
-      info clientAddr, ": ", fmt"socks5 proxy handshake: {serverAddr=}"
-      await client.send("\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
-      return serverAddr
-  else:
-    await client.send("\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00")
-    raise newException(
-      ValueError,
-      fmt"socks5 proxy handshake error: command({cmd}) not supported / protocol error",
-    )
-
-proc httpProxyExtractServerAddr(
-    client: AsyncSocket
-): Future[(string, uint16)] {.async.} =
-  ## extract remote server address from http proxy handshake
-  ##
-  ## NOTE:
-  ## we find remote server address from `Host` header,
-  ## and not authentication support now.
-
-  var line = ""
-  while true:
-    line = await client.recvLine()
-    if line == "\r\n":
-      return
-    if line.startsWith("Host: "):
-      let split = line[6 ..^ 1].split(":")
-      result = (split[0], split[1].parseInt().uint16)
-
-proc httpProxyHandshake(client: AsyncSocket): Future[(string, uint16)] {.async.} =
-  ## handle http proxy handshake
-
-  let clientAddr = client.getPeerAddr()
-  let serverAddr = await httpProxyExtractServerAddr(client)
-  if serverAddr == default((string, uint16)):
-    await client.send("HTTP/1.1 400 Bad Request\r\nProxy-agent: MyProxy/1.0\r\n\r\n")
-    raise newException(ValueError, "http proxy handshake error: serverAddr not found")
-  info clientAddr, ": ", fmt"http proxy handshake: {serverAddr=}"
-  await client.send(
-    "HTTP/1.1 200 Connection established\r\nProxy-agent: MyProxy/1.0\r\n\r\n"
-  )
-  return serverAddr
-
-proc proxyHandshake(client: AsyncSocket): Future[(string, uint16)] {.async.} =
-  ## handle proxy handshake
-  ##
-  ## supported proxy protocols:
-  ## 1. http
-  ## 2. socks5
-
-  case await guessProxyProtocol(client)
-  of Http:
-    result = await httpProxyHandshake(client)
-  of Socks5:
-    result = await socks5ProxyHandshake(client)
-  of Unknown:
-    raise newException(ValueError, "unknown proxy protocol")
-
 # === Client ===
 
 type Client = ref object
@@ -143,6 +13,7 @@ type Client = ref object
   remoteSock: AsyncSocket
   address: (string, uint16)
   remoteAddress: (string, uint16)
+  proxyProtocol: ProxyProtocol
   doh: Doh
 
 func `$`(client: Client): string =
@@ -159,6 +30,135 @@ proc close(client: Client) =
     client.sock.close()
   if client.remoteSock != nil:
     client.remoteSock.close()
+
+proc guessProxyProtocol(client: Client): Future[ProxyProtocol] {.async.} =
+  ## guess proxy protocol
+
+  var data = await client.sock.recv(1)
+  if data[0].int == 0x05:
+    return Socks5
+  if data[0] == 'C':
+    data = await client.sock.recv(6)
+    if data == "ONNECT":
+      return Http
+  if data[0].int == 0x16: # tls record: type=handshake
+    return None
+  return Unknown
+
+proc socks5ProxyExtractServerAddr(client: Client): Future[(string, uint16)] {.async.} =
+  ## extract remote server address from socks5 proxy handshake
+
+  let addrType = (await client.sock.recv(1))[0].int
+  case addrType
+  of 0x01: # IPV4
+    var data: array[0 .. 3, uint8]
+    discard await client.sock.recvInto(data.addr, 4)
+    let ipv4 = IpAddress(family: IPv4, address_v4: data)
+    let port = (await client.sock.recv(2)).be16()
+    result = ($ipv4, port)
+  of 0x03: # Domain name (len(1B)+name)
+    let len = (await client.sock.recv(1))[0].int
+    let domain = await client.sock.recv(len)
+    let port = (await client.sock.recv(2)).be16()
+    result = (domain, port)
+  of 0x04: # IPV6
+    var data: array[0 .. 15, uint8]
+    discard await client.sock.recvInto(data.addr, 16)
+    let ipv6 = IpAddress(family: IPv6, address_v6: data)
+    let port = (await client.sock.recv(2)).be16()
+    result = ($ipv6, port)
+  else:
+    return
+
+proc socks5ProxyHandshake(client: Client): Future[(string, uint16)] {.async.} =
+  ## handle socks5 proxy handshake
+  ##
+  ## https://en.m.wikipedia.org/wiki/SOCKS
+  ##
+  ## NOTE:
+  ## we only support tcp and no auth now.
+
+  # 1. initial request
+  let nauth = (await client.sock.recv(1))[0].int
+  discard await client.sock.recv(nauth)
+  await client.sock.send("\x05\x00") # no auth
+  info client, ": ", fmt"socks5 proxy handshake: auth=0x00(no auth)"
+
+  # 2. auth requeset (skip when no auth)
+
+  # 3. client connection request
+  let header = await client.sock.recv(3)
+  # echo fmt"{header.repr =}"
+  assert header[0].int == 0x05
+  let cmd = header[1].int
+  case cmd
+  of 0x01: # establish a TCP/IP stream connection
+    let serverAddr = await socks5ProxyExtractServerAddr(client)
+    if serverAddr == default((string, uint16)):
+      await client.sock.send("\x05\x08\x00\x01\x00\x00\x00\x00\x00\x00")
+      raise newException(
+        ValueError, "socks5 proxy handshake error: address type not supported"
+      )
+    else:
+      info client, ": ", fmt"socks5 proxy handshake: {serverAddr=}"
+      await client.sock.send("\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
+      return serverAddr
+  else:
+    await client.sock.send("\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00")
+    raise newException(
+      ValueError,
+      fmt"socks5 proxy handshake error: command({cmd}) not supported / protocol error",
+    )
+
+proc httpProxyExtractServerAddr(client: Client): Future[(string, uint16)] {.async.} =
+  ## extract remote server address from http proxy handshake
+  ##
+  ## NOTE:
+  ## we find remote server address from `Host` header,
+  ## and not authentication support now.
+
+  var line = ""
+  while true:
+    line = await client.sock.recvLine()
+    if line == "\r\n":
+      return
+    if line.startsWith("Host: "):
+      let split = line[6 ..^ 1].split(":")
+      result = (split[0], split[1].parseInt().uint16)
+
+proc httpProxyHandshake(client: Client): Future[(string, uint16)] {.async.} =
+  ## handle http proxy handshake
+
+  let serverAddr = await httpProxyExtractServerAddr(client)
+  if serverAddr == default((string, uint16)):
+    await client.sock.send(
+      "HTTP/1.1 400 Bad Request\r\nProxy-agent: MyProxy/1.0\r\n\r\n"
+    )
+    raise newException(ValueError, "http proxy handshake error: serverAddr not found")
+  info client, ": ", fmt"http proxy handshake: {serverAddr=}"
+  await client.sock.send(
+    "HTTP/1.1 200 Connection established\r\nProxy-agent: MyProxy/1.0\r\n\r\n"
+  )
+  return serverAddr
+
+proc proxyHandshake(client: Client): Future[(string, uint16)] {.async.} =
+  ## handle proxy handshake
+  ##
+  ## supported proxy protocols:
+  ## 1. http
+  ## 2. socks5
+
+  let proxyProtocol = await guessProxyProtocol(client)
+  client.proxyProtocol = proxyProtocol
+  case proxyProtocol
+  of Http:
+    result = await httpProxyHandshake(client)
+  of Socks5:
+    result = await socks5ProxyHandshake(client)
+  of None:
+    discard
+  of Unknown:
+    raise newException(ValueError, "unknown proxy protocol")
 
 proc connectRemote(client: Client, remoteAddress: (string, uint16)) {.async.} =
   ## connect to remote
@@ -181,12 +181,16 @@ proc connectRemote(client: Client, remoteAddress: (string, uint16)) {.async.} =
   client.remoteAddress = remoteAddress
   client.remoteSock = remoteSock
 
-proc handleTlsClientHello(client: Client) {.async.} =
-  ## handle TLS client hello
+proc processTlsClientHello(client: Client): Future[(string, seq[string])] {.async.} =
+  ## process TLS client hello
   ##
   ## https://tls13.xargs.org/#client-hello
 
-  let recordHeader = await client.sock.recv(5)
+  let recordHeader =
+    if client.proxyProtocol == None:
+      "\x16" & (await client.sock.recv(4))
+    else:
+      await client.sock.recv(5)
 
   let recordType = recordHeader[0].int
   if recordType != 0x16:
@@ -218,12 +222,8 @@ proc handleTlsClientHello(client: Client) {.async.} =
 
   # fragmentize TLS client hello
   let fragmentList = fragmentizeTlsClientHello(handshakeData, sni, recordHeader[0 .. 2])
-  info client, ": ", fmt"send TLS client hello, {fragmentList.len=}"
 
-  # send fragmentList
-  for fragment in fragmentList:
-    await sleepAsync 10
-    await client.remoteSock.send(fragment)
+  return (sni, fragmentList)
 
 proc upstreaming(client: Client) {.async.} =
   ## upstreaming
@@ -269,14 +269,27 @@ proc handleClient(client: Client) {.async.} =
   # 1. proxy handshake
   var remoteAddress: (string, uint16)
   try:
-    remoteAddress = await proxyHandshake(client.sock)
+    remoteAddress = await client.proxyHandshake()
   except Exception as e:
     error client, ": ", fmt"proxy handshake error: err={e.msg}"
     return
 
+  # 2. process TLS client hello
+  info client, ": ", "process TLS client hello"
+  var tlsClientHelloData: (string, seq[string])
+  try:
+    tlsClientHelloData = await client.processTlsClientHello()
+  except Exception as e:
+    error client, ": ", fmt"process TLS client hello error: err={e.msg}"
+    return
+
+  let (sni, fragmentList) = tlsClientHelloData
+  if client.proxyProtocol == None:
+    remoteAddress = (sni, 443)
+
   assert remoteAddress != default((string, uint16))
 
-  # 2. client connect to remote server
+  # 3. client connect to remote server
   try:
     info client, ": ", fmt"connect remote server {remoteAddress}"
     await client.connectRemote(remoteAddress)
@@ -284,15 +297,17 @@ proc handleClient(client: Client) {.async.} =
     error client, ": ", fmt"connect remote server error: {remoteAddress}, err={e.msg}"
     return
 
-  # 3. handle tls client hello
+  # 4. send tls client hello
   try:
-    info client, ": ", "TLS client hello"
-    await client.handleTlsClientHello()
+    info client, ": ", fmt"send TLS client hello, {fragmentList.len=}"
+    for fragment in fragmentList:
+      await sleepAsync 10
+      await client.remoteSock.send(fragment)
   except Exception as e:
-    error client, ": ", fmt"TLS client hello error, err={e.msg}"
+    error client, ": ", fmt"send TLS client hello error, err={e.msg}"
     return
 
-  # 4. spawn downstreaming
+  # 5. spawn downstreaming
   try:
     debug client, ": ", "spawn downstreaming"
     asyncCheck downstreamingThreadProc(client)
@@ -300,7 +315,7 @@ proc handleClient(client: Client) {.async.} =
     error client, ": ", fmt"failed to spawn downstreaming, err={e.msg}"
     return
 
-  # 5. upstreaming
+  # 6. upstreaming
   try:
     debug client, ": ", "upstreaming"
     await client.upstreaming()

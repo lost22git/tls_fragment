@@ -57,6 +57,7 @@ proc randomSlice*(init: Slice[int], minLen = 1): seq[Slice[int]] =
 
 type ProxyProtocol* = enum
   Unknown
+  None
   Http
   Socks5
 
