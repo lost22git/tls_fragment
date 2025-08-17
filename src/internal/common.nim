@@ -175,7 +175,7 @@ else:
 # === Logging ===
 
 let logger* =
-  newConsoleLogger(fmtStr = "$levelId$datetime| ", levelThreshold = config.logLevel)
+  newConsoleLogger(fmtStr = "$levelId$datetime|", levelThreshold = config.logLevel)
 
 addHandler(logger)
 
