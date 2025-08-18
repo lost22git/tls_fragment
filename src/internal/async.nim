@@ -45,7 +45,7 @@ proc guessProxyProtocol(client: Client): Future[ProxyProtocol] {.async.} =
     return None
   return Unknown
 
-proc socks5ProxyExtractServerAddr(client: Client): Future[(string, uint16)] {.async.} =
+proc socks5ProxyExtractRemoteAddr(client: Client): Future[(string, uint16)] {.async.} =
   ## extract remote server address from socks5 proxy handshake
 
   let addrType = (await client.sock.recv(1))[0].int
@@ -93,16 +93,16 @@ proc socks5ProxyHandshake(client: Client): Future[(string, uint16)] {.async.} =
   let cmd = header[1].int
   case cmd
   of 0x01: # establish a TCP/IP stream connection
-    let serverAddr = await socks5ProxyExtractServerAddr(client)
-    if serverAddr == default((string, uint16)):
+    let remoteAddr = await socks5ProxyExtractRemoteAddr(client)
+    if remoteAddr == default((string, uint16)):
       await client.sock.send("\x05\x08\x00\x01\x00\x00\x00\x00\x00\x00")
       raise newException(
         ValueError, "socks5 proxy handshake error: address type not supported"
       )
     else:
-      info client, ": ", fmt"socks5 proxy handshake: {serverAddr=}"
+      info client, ": ", fmt"socks5 proxy handshake: {remoteAddr=}"
       await client.sock.send("\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
-      return serverAddr
+      return remoteAddr
   else:
     await client.sock.send("\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00")
     raise newException(
@@ -110,7 +110,7 @@ proc socks5ProxyHandshake(client: Client): Future[(string, uint16)] {.async.} =
       fmt"socks5 proxy handshake error: command({cmd}) not supported / protocol error",
     )
 
-proc httpProxyExtractServerAddr(client: Client): Future[(string, uint16)] {.async.} =
+proc httpProxyExtractRemoteAddr(client: Client): Future[(string, uint16)] {.async.} =
   ## extract remote server address from http proxy handshake
   ##
   ## NOTE:
@@ -129,17 +129,17 @@ proc httpProxyExtractServerAddr(client: Client): Future[(string, uint16)] {.asyn
 proc httpProxyHandshake(client: Client): Future[(string, uint16)] {.async.} =
   ## handle http proxy handshake
 
-  let serverAddr = await httpProxyExtractServerAddr(client)
-  if serverAddr == default((string, uint16)):
+  let remoteAddr = await httpProxyExtractRemoteAddr(client)
+  if remoteAddr == default((string, uint16)):
     await client.sock.send(
       "HTTP/1.1 400 Bad Request\r\nProxy-agent: MyProxy/1.0\r\n\r\n"
     )
-    raise newException(ValueError, "http proxy handshake error: serverAddr not found")
-  info client, ": ", fmt"http proxy handshake: {serverAddr=}"
+    raise newException(ValueError, "http proxy handshake error: remoteAddr not found")
+  info client, ": ", fmt"http proxy handshake: {remoteAddr=}"
   await client.sock.send(
     "HTTP/1.1 200 Connection established\r\nProxy-agent: MyProxy/1.0\r\n\r\n"
   )
-  return serverAddr
+  return remoteAddr
 
 proc proxyHandshake(client: Client): Future[(string, uint16)] {.async.} =
   ## handle proxy handshake
