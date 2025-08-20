@@ -15,10 +15,10 @@ requires "nim >= 2.2.4"
 requires "weave >= 0.4.10"
 
 task buildSync, "build sync version":
-  exec "nimble build --verbose -d:release -d:lto -d:ssl --mm:atomicArc"
+  exec "nimble build --verbose -d:release -d:lto --mm:atomicArc"
 
 task buildPool, "build thread pool version":
-  exec "nimble build --verbose -d:release -d:lto -d:ssl --mm:atomicArc -d:pool"
+  exec "nimble build --verbose -d:release -d:lto --mm:atomicArc -d:pool"
 
 task buildAsync, "build async version":
-  exec "nimble build --verbose -d:release -d:lto -d:ssl --threads:off -d:useMalloc -d:async"
+  exec "nimble build --verbose -d:release -d:lto --threads:off -d:useMalloc -d:async"
