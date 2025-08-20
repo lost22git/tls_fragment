@@ -10,8 +10,8 @@
 | Website | Requirements |
 |------|------|
 | common | DoH + TLS fragment |
-| cloudflare-dns.com | TCP fragment
-| google.com youtube.com ... | not work, maybe IP list resolve via DoH are banned |
+| cloudflare-dns.com | DoH + TLS fragment + TCP fragment
+| google.com youtube.com ... | **not work**, maybe IP list resolved via DoH are banned |
 
 
 
