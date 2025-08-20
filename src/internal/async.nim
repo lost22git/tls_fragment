@@ -160,27 +160,6 @@ proc proxyHandshake(client: Client): Future[(string, uint16)] {.async.} =
   of Unknown:
     raise newException(ValueError, "unknown proxy protocol")
 
-proc connectRemote(client: Client, remoteAddress: (string, uint16)) {.async.} =
-  ## connect to remote
-
-  # resolve ip via DoH
-  var host = ""
-  let domain = remoteAddress[0]
-  try:
-    host = await client.doh.resolve(domain)
-    info client, ": ", fmt"DoH resolved: {domain} -> {host}"
-  except Exception as e:
-    raise newException(ValueError, fmt"DoH resolve error, {domain=}, err={e.msg}")
-
-  # connect remote
-  let remoteSock = newAsyncSocket(buffered = false)
-  remoteSock.setSockOpt(OptNoDelay, true, level = IPPROTO_TCP.cint)
-  await remoteSock.connect(host, 443.Port)
-
-  # bind info to client
-  client.remoteAddress = remoteAddress
-  client.remoteSock = remoteSock
-
 proc processTlsClientHello(client: Client): Future[(string, seq[string])] {.async.} =
   ## process TLS client hello
   ##
@@ -225,6 +204,27 @@ proc processTlsClientHello(client: Client): Future[(string, seq[string])] {.asyn
 
   return (sni, fragmentList)
 
+proc connectRemote(client: Client, remoteAddress: (string, uint16)) {.async.} =
+  ## connect to remote
+
+  # resolve ip via DoH
+  var host = ""
+  let domain = remoteAddress[0]
+  try:
+    host = await client.doh.resolve(domain)
+    info client, ": ", fmt"DoH resolved: {domain} -> {host}"
+  except Exception as e:
+    raise newException(ValueError, fmt"DoH resolve error, {domain=}, err={e.msg}")
+
+  # connect remote
+  let remoteSock = newAsyncSocket(buffered = false)
+  remoteSock.setSockOpt(OptNoDelay, true, level = IPPROTO_TCP.cint)
+  await remoteSock.connect(host, 443.Port)
+
+  # bind info to client
+  client.remoteAddress = remoteAddress
+  client.remoteSock = remoteSock
+
 proc upstreaming(client: Client) {.async.} =
   ## upstreaming
 
@@ -239,21 +239,16 @@ proc upstreaming(client: Client) {.async.} =
 proc downstreaming(client: Client) {.async.} =
   ## downstreaming
 
-  while true:
-    let data = await client.remoteSock.recv(16384)
-    if data == "":
-      raise newException(
-        ValueError, "downstream data is EOF (remote server is disconnected)"
-      )
-    debug client, ": ", fmt"downstream {data.len=}"
-    debug client, ": ", fmt"downstream {data=}"
-    await client.sock.send(data)
-
-proc downstreamingThreadProc(client: Client) {.async.} =
-  ## a thread proc for downstreaming
-
   try:
-    await client.downstreaming()
+    while true:
+      let data = await client.remoteSock.recv(16384)
+      if data == "":
+        raise newException(
+          ValueError, "downstream data is EOF (remote server is disconnected)"
+        )
+      debug client, ": ", fmt"downstream {data.len=}"
+      debug client, ": ", fmt"downstream {data=}"
+      await client.sock.send(data)
   except Exception as e:
     if e.msg != "Bad file descriptor":
       error client, ": ", fmt"downstream error: err={e.msg}"
@@ -310,7 +305,7 @@ proc handleClient(client: Client) {.async.} =
   # 5. spawn downstreaming
   try:
     debug client, ": ", "spawn downstreaming"
-    asyncCheck downstreamingThreadProc(client)
+    asyncCheck client.downstreaming()
   except Exception as e:
     error client, ": ", fmt"failed to spawn downstreaming, err={e.msg}"
     return

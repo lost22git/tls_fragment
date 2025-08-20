@@ -165,18 +165,6 @@ proc proxyHandshake(client: Client): (string, uint16) =
   of Unknown:
     raise newException(ValueError, "unknown proxy protocol")
 
-proc connectRemote(client: Client, remoteAddress: (string, uint16)) =
-  ## connect to remote
-  ##
-  ## TODO:
-  ## 1. doh resolve remoteAddress
-
-  let remoteSock = newSocket(buffered = false)
-  let (host, port) = remoteAddress
-  remoteSock.connect(host, port.Port, timeout = client.config.cnnTimeout)
-  client.remoteAddress = remoteAddress
-  client.remoteSock = remoteSock
-
 proc processTlsClientHello(client: Client): (string, seq[string]) =
   ## process TLS client hello
   ##
@@ -221,6 +209,18 @@ proc processTlsClientHello(client: Client): (string, seq[string]) =
 
   return (sni, fragmentList)
 
+proc connectRemote(client: Client, remoteAddress: (string, uint16)) =
+  ## connect to remote
+  ##
+  ## TODO:
+  ## 1. doh resolve remoteAddress
+
+  let remoteSock = newSocket(buffered = false)
+  let (host, port) = remoteAddress
+  remoteSock.connect(host, port.Port, timeout = client.config.cnnTimeout)
+  client.remoteAddress = remoteAddress
+  client.remoteSock = remoteSock
+
 proc upstreaming(client: Client) =
   ## upstreaming
 
@@ -232,21 +232,8 @@ proc upstreaming(client: Client) =
     debug client, ": ", fmt"upstream {data=}"
     client.remoteSock.send(data)
 
-proc downstreaming(client: Client) =
+proc downstreaming(client: Client) {.thread.} =
   ## downstreaming
-
-  while true:
-    let data = client.remoteSock.recv(16384)
-    if data == "":
-      raise newException(
-        ValueError, "downstream data is EOF (remote server is disconnected)"
-      )
-    debug client, ": ", fmt"downstream {data.len=}"
-    debug client, ": ", fmt"downstream {data=}"
-    client.sock.send(data)
-
-proc downstreamingThreadProc(client: Client) {.thread.} =
-  ## a thread proc for downstreaming
 
   {.gcsafe.}:
     addHandler(logger)
@@ -254,7 +241,15 @@ proc downstreamingThreadProc(client: Client) {.thread.} =
       removeHandler(logger)
 
   try:
-    client.downstreaming()
+    while true:
+      let data = client.remoteSock.recv(16384)
+      if data == "":
+        raise newException(
+          ValueError, "downstream data is EOF (remote server is disconnected)"
+        )
+      debug client, ": ", fmt"downstream {data.len=}"
+      debug client, ": ", fmt"downstream {data=}"
+      client.sock.send(data)
   except Exception as e:
     if e.msg != "Bad file descriptor":
       error client, ": ", fmt"downstream error: err={e.msg}"
@@ -316,9 +311,9 @@ proc handleClient(client: Client) {.thread.} =
   try:
     debug client, ": ", "spawn downstreaming"
     when defined(pool):
-      spawn downstreamingThreadProc(client)
+      spawn client.downstreaming()
     else:
-      createThread(client.downstreamThread, downstreamingThreadProc, client)
+      createThread(client.downstreamThread, downstreaming, client)
   except Exception as e:
     error client, ": ", fmt"failed to spawn downstreaming, err={e.msg}"
     return
