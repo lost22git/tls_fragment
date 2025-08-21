@@ -1,4 +1,5 @@
-import std/[strformat, net, logging, exitprocs, random, strutils]
+import std/[strformat, net, exitprocs, random, strutils]
+import chronicles
 
 func be16*(data: openArray[char]): uint16 =
   ## big endian decode
@@ -165,19 +166,16 @@ type ClientConfig* = object
 type Config* = object
   server*: ServerConfig
   client*: ClientConfig
-  logLevel*: Level = lvlAll
 
-when defined(release):
-  let config* = Config(logLevel: lvlInfo)
-else:
-  let config* = Config()
+let config* = Config()
 
 # === Logging ===
 
-let logger* =
-  newConsoleLogger(fmtStr = "$levelId$datetime|", levelThreshold = config.logLevel)
-
-addHandler(logger)
+template logClient*() =
+  logScope:
+    id = client.id
+    address = client.address
+    remoteAddress = client.remoteAddress
 
 # === Exit Hook ===
 

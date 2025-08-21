@@ -1,5 +1,6 @@
-import std/[strformat, strutils, sequtils, net, logging, typedThreads, oids]
+import std/[strformat, strutils, sequtils, net, typedThreads, oids]
 import ./common
+import chronicles
 
 when defined(pool):
   import weave
@@ -22,13 +23,6 @@ type Client = ref object
   when not defined(pool):
     runThread: Thread[Client]
     downstreamThread: Thread[Client]
-
-func `$`(client: Client): string =
-  return
-    if client.remoteSock == nil:
-      fmt"{client.id}<{client.address}>"
-    else:
-      fmt"{client.id}<{client.address},{client.remoteAddress}>"
 
 proc close(client: Client) =
   ## close client
@@ -85,11 +79,13 @@ proc socks5ProxyHandshake(client: Client): (string, uint16) =
   ## NOTE:
   ## we only support tcp and no auth now.
 
+  logClient()
+
   # 1. initial request
   let nauth = client.sock.recv(1)[0].int
   discard client.sock.recv(nauth)
   client.sock.send("\x05\x00") # no auth
-  info client, ": ", fmt"socks5 proxy handshake: auth=0x00(no auth)"
+  info "socks5 proxy handshake: auth=0x00(no auth)"
 
   # 2. auth requeset (skip when no auth)
 
@@ -107,7 +103,7 @@ proc socks5ProxyHandshake(client: Client): (string, uint16) =
         ValueError, "socks5 proxy handshake error: address type not supported"
       )
     else:
-      info client, ": ", fmt"socks5 proxy handshake: {remoteAddr=}"
+      info "socks5 proxy handshake extracted remote addresss", remoteAddr
       client.sock.send("\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
       return remoteAddr
   else:
@@ -136,11 +132,13 @@ proc httpProxyExtractRemoteAddr(client: Client): (string, uint16) =
 proc httpProxyHandshake(client: Client): (string, uint16) =
   ## handle http proxy handshake
 
+  logClient()
+
   let remoteAddr = httpProxyExtractRemoteAddr(client)
   if remoteAddr == default((string, uint16)):
     client.sock.send("HTTP/1.1 400 Bad Request\r\nProxy-agent: MyProxy/1.0\r\n\r\n")
     raise newException(ValueError, "http proxy handshake error: remoteAddr not found")
-  info client, ": ", fmt"http proxy handshake: {remoteAddr=}"
+  info "http proxy handshake extracted remote address", remoteAddr
   client.sock.send(
     "HTTP/1.1 200 Connection established\r\nProxy-agent: MyProxy/1.0\r\n\r\n"
   )
@@ -169,6 +167,8 @@ proc processTlsClientHello(client: Client): (string, seq[string]) =
   ## process TLS client hello
   ##
   ## https://tls13.xargs.org/#client-hello
+
+  logClient()
 
   let recordHeader =
     if client.proxyProtocol == None:
@@ -202,86 +202,82 @@ proc processTlsClientHello(client: Client): (string, seq[string]) =
     raise newException(ValueError, "not TLS 1.3")
 
   assert sni != ""
-  info client, ": ", fmt"{sni=}"
+  info "sni parsed", sni
 
   # fragmentize TLS client hello
   let fragmentList = fragmentizeTlsClientHello(handshakeData, sni, recordHeader[..2])
 
   return (sni, fragmentList)
 
-proc connectRemote(client: Client, remoteAddress: (string, uint16)) =
+proc connectRemote(client: Client) =
   ## connect to remote
   ##
   ## TODO:
   ## 1. doh resolve remoteAddress
 
   let remoteSock = newSocket(buffered = false)
-  let (host, port) = remoteAddress
+  remoteSock.setSockOpt(OptNoDelay, true, level = IPPROTO_TCP.cint)
+  let (host, port) = client.remoteAddress
   remoteSock.connect(host, port.Port, timeout = client.config.cnnTimeout)
-  client.remoteAddress = remoteAddress
   client.remoteSock = remoteSock
 
 proc upstreaming(client: Client) =
   ## upstreaming
 
+  logClient()
+
   while true:
     let data = client.sock.recv(16384)
     if data == "":
-      raise newException(ValueError, "upstream data is EOF (client is disconnected)")
-    debug client, ": ", fmt"upstream {data.len=}"
-    debug client, ": ", fmt"upstream {data=}"
+      raise newException(ValueError, "upstreaming data is EOF (client is disconnected)")
+    debug "upstreaming", dataLen = data.len
+    debug "upstreaming", data
     client.remoteSock.send(data)
 
 proc downstreaming(client: Client) {.thread.} =
   ## downstreaming
 
-  {.gcsafe.}:
-    addHandler(logger)
-    when defined(pool):
-      removeHandler(logger)
+  logClient()
 
   try:
     while true:
       let data = client.remoteSock.recv(16384)
       if data == "":
         raise newException(
-          ValueError, "downstream data is EOF (remote server is disconnected)"
+          ValueError, "downstreaming data is EOF (remote server is disconnected)"
         )
-      debug client, ": ", fmt"downstream {data.len=}"
-      debug client, ": ", fmt"downstream {data=}"
+      debug "downstreaming", dataLen = data.len
+      debug "downstreaming", data
       client.sock.send(data)
-  except Exception as e:
-    if e.msg != "Bad file descriptor":
-      error client, ": ", fmt"downstream error: err={e.msg}"
+  except Exception as err:
+    if err.msg != "Bad file descriptor":
+      error "downstreaming error", err
     client.close()
 
 proc handleClient(client: Client) {.thread.} =
   ## handle a new client
 
-  {.gcsafe.}:
-    addHandler(logger)
-    when defined(pool):
-      removeHandler(logger)
+  logClient()
 
   defer:
-    info client, ": ", "client is closed"
+    info "client is closed"
     client.close()
 
   # 1. proxy handshake
   var remoteAddress: (string, uint16)
   try:
     remoteAddress = client.proxyHandshake()
-  except Exception as e:
-    error client, ": ", fmt"proxy handshake error: err={e.msg}"
+  except Exception as err:
+    error "proxy handshake error", err
     return
 
   # 2. process TLS client hello
-  info client, ": ", "process TLS client hello"
+  info "process TLS client hello"
   var tlsClientHelloData: (string, seq[string])
   try:
     tlsClientHelloData = client.processTlsClientHello()
-  except Exception as e:
-    error client, ": ", fmt"process TLS client hello error: err={e.msg}"
+  except Exception as err:
+    error "process TLS client hello error", err
     return
 
   let (sni, fragmentList) = tlsClientHelloData
@@ -289,42 +285,43 @@ proc handleClient(client: Client) {.thread.} =
     remoteAddress = (sni, 443)
 
   assert remoteAddress != default((string, uint16))
+  client.remoteAddress = remoteAddress
 
   # 3. client connect to remote server
   try:
-    info client, ": ", fmt"connect remote server {remoteAddress}"
-    client.connectRemote(remoteAddress)
-  except Exception as e:
-    error client, ": ", fmt"connect remote server error: {remoteAddress}, err={e.msg}"
+    info "connect remote server"
+    client.connectRemote()
+  except Exception as err:
+    error "connect remote server error", err
     return
 
   # 4. send tls client hello
   try:
-    info client, ": ", fmt"send TLS client hello, {fragmentList.len=}"
+    info "send TLS client hello", fragmentListLen = fragmentList.len
     for fragment in fragmentList:
       client.remoteSock.send(fragment)
-  except Exception as e:
-    error client, ": ", fmt"send TLS client hello error, err={e.msg}"
+  except Exception as err:
+    error "send TLS client hello error", err
     return
 
   # 5. spawn downstreaming
   try:
-    debug client, ": ", "spawn downstreaming"
+    debug "spawn downstreaming"
     when defined(pool):
       spawn client.downstreaming()
     else:
       createThread(client.downstreamThread, downstreaming, client)
-  except Exception as e:
-    error client, ": ", fmt"failed to spawn downstreaming, err={e.msg}"
+  except Exception as err:
+    error "failed to spawn downstreaming", err
     return
 
   # 6. upstreaming
   try:
-    debug client, ": ", "upstreaming"
+    debug "upstreaming"
     client.upstreaming()
-  except Exception as e:
-    if e.msg != "Bad file descriptor":
-      error client, ": ", fmt"upstream error: err={e.msg}"
+  except Exception as err:
+    if err.msg != "Bad file descriptor":
+      error "upstreaming error", err
     return
 
 # === Server ===
@@ -352,18 +349,13 @@ proc closeAndWait(server: Server) =
 proc start(server: Server) {.thread.} =
   ## start proxy server
 
-  {.gcsafe.}:
-    addHandler(logger)
-    when defined(pool):
-      removeHandler(logger)
-
   server.sock = newSocket(buffered = false)
   server.sock.setSockOpt(OptReusePort, true)
   server.sock.setSockOpt(OptReuseAddr, true)
   server.sock.bindAddr(Port(server.config.port), server.config.host)
   server.sock.listen(backlog = server.config.backlog)
 
-  info fmt"server is listening at {server.sock.getLocalAddr()}"
+  info "server is listening", address = server.sock.getLocalAddr()
 
   defer:
     info "server is closed"
@@ -376,9 +368,9 @@ proc start(server: Server) {.thread.} =
   while true:
     when not defined(pool):
       server.clientList = server.clientList.filterIt(it.runThread.running())
-      info fmt"{server.clientList.len=}"
+      info "client list", len = server.clientList.len
     {.gcsafe.}:
-      var client = Client(config: config.client, id: genOid())
+      var client = Client(config: common.config.client, id: genOid())
     server.sock.accept(client.sock)
     client.address = client.sock.getPeerAddr()
     when defined(pool):
@@ -398,7 +390,7 @@ proc startAndWait(server: Server) =
 when defined(pool):
   init(Weave)
 
-var server = Server(config: config.server)
+var server = Server(config: common.config.server)
 server.startAndWait()
 
 when defined(pool):

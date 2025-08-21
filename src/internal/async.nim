@@ -1,6 +1,7 @@
-import std/[strformat, strutils, net, asyncnet, asyncdispatch, logging, oids]
+import std/[strformat, strutils, net, asyncnet, asyncdispatch, oids]
 import ./common
 import ./asyncdoh
+import chronicles
 
 echo "=== ASYNC ==="
 
@@ -15,13 +16,6 @@ type Client = ref object
   remoteAddress: (string, uint16)
   proxyProtocol: ProxyProtocol
   doh: Doh
-
-func `$`(client: Client): string =
-  return
-    if client.remoteSock == nil:
-      fmt"{client.id}<{client.address}>"
-    else:
-      fmt"{client.id}<{client.address},{client.remoteAddress}>"
 
 proc close(client: Client) =
   ## close client
@@ -78,11 +72,13 @@ proc socks5ProxyHandshake(client: Client): Future[(string, uint16)] {.async.} =
   ## NOTE:
   ## we only support tcp and no auth now.
 
+  logClient()
+
   # 1. initial request
   let nauth = (await client.sock.recv(1))[0].int
   discard await client.sock.recv(nauth)
   await client.sock.send("\x05\x00") # no auth
-  info client, ": ", fmt"socks5 proxy handshake: auth=0x00(no auth)"
+  info "socks5 proxy handshake: auth=0x00(no auth)"
 
   # 2. auth requeset (skip when no auth)
 
@@ -100,7 +96,7 @@ proc socks5ProxyHandshake(client: Client): Future[(string, uint16)] {.async.} =
         ValueError, "socks5 proxy handshake error: address type not supported"
       )
     else:
-      info client, ": ", fmt"socks5 proxy handshake: {remoteAddr=}"
+      info "socks5 proxy handshake extracted remote address", remoteAddr
       await client.sock.send("\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
       return remoteAddr
   else:
@@ -129,13 +125,15 @@ proc httpProxyExtractRemoteAddr(client: Client): Future[(string, uint16)] {.asyn
 proc httpProxyHandshake(client: Client): Future[(string, uint16)] {.async.} =
   ## handle http proxy handshake
 
+  logClient()
+
   let remoteAddr = await httpProxyExtractRemoteAddr(client)
   if remoteAddr == default((string, uint16)):
     await client.sock.send(
       "HTTP/1.1 400 Bad Request\r\nProxy-agent: MyProxy/1.0\r\n\r\n"
     )
     raise newException(ValueError, "http proxy handshake error: remoteAddr not found")
-  info client, ": ", fmt"http proxy handshake: {remoteAddr=}"
+  info "http proxy handshake extracted remote address", remoteAddr
   await client.sock.send(
     "HTTP/1.1 200 Connection established\r\nProxy-agent: MyProxy/1.0\r\n\r\n"
   )
@@ -164,6 +162,8 @@ proc processTlsClientHello(client: Client): Future[(string, seq[string])] {.asyn
   ## process TLS client hello
   ##
   ## https://tls13.xargs.org/#client-hello
+
+  logClient()
 
   let recordHeader =
     if client.proxyProtocol == None:
@@ -197,22 +197,24 @@ proc processTlsClientHello(client: Client): Future[(string, seq[string])] {.asyn
     raise newException(ValueError, "not TLS 1.3")
 
   assert sni != ""
-  info client, ": ", fmt"{sni=}"
+  info "sni parsed", sni
 
   # fragmentize TLS client hello
   let fragmentList = fragmentizeTlsClientHello(handshakeData, sni, recordHeader[0 .. 2])
 
   return (sni, fragmentList)
 
-proc connectRemote(client: Client, remoteAddress: (string, uint16)) {.async.} =
+proc connectRemote(client: Client) {.async.} =
   ## connect to remote
+
+  logClient()
 
   # resolve ip via DoH
   var host = ""
-  let domain = remoteAddress[0]
+  let domain = client.remoteAddress[0]
   try:
     host = await client.doh.resolve(domain)
-    info client, ": ", fmt"DoH resolved: {domain} -> {host}"
+    info "DoH resolved", domain, host
   except Exception as e:
     raise newException(ValueError, fmt"DoH resolve error, {domain=}, err={e.msg}")
 
@@ -222,60 +224,65 @@ proc connectRemote(client: Client, remoteAddress: (string, uint16)) {.async.} =
   await remoteSock.connect(host, 443.Port)
 
   # bind info to client
-  client.remoteAddress = remoteAddress
   client.remoteSock = remoteSock
 
 proc upstreaming(client: Client) {.async.} =
   ## upstreaming
 
+  logClient()
+
   while true:
     let data = await client.sock.recv(16384)
     if data == "":
-      raise newException(ValueError, "upstream data is EOF (client is disconnected)")
-    debug client, ": ", fmt"upstream {data.len=}"
-    debug client, ": ", fmt"upstream {data=}"
+      raise newException(ValueError, "upstreaming data is EOF (client is disconnected)")
+    debug "upstreaming", dataLen = data.len
+    debug "upstreaming", data
     await client.remoteSock.send(data)
 
 proc downstreaming(client: Client) {.async.} =
   ## downstreaming
+
+  logClient()
 
   try:
     while true:
       let data = await client.remoteSock.recv(16384)
       if data == "":
         raise newException(
-          ValueError, "downstream data is EOF (remote server is disconnected)"
+          ValueError, "downstreaming data is EOF (remote server is disconnected)"
         )
-      debug client, ": ", fmt"downstream {data.len=}"
-      debug client, ": ", fmt"downstream {data=}"
+      debug "downstreaming", dataLen = data.len
+      debug "downstreaming", data
       await client.sock.send(data)
-  except Exception as e:
-    if e.msg != "Bad file descriptor":
-      error client, ": ", fmt"downstream error: err={e.msg}"
+  except Exception as err:
+    if err.msg != "Bad file descriptor":
+      error "downstreaming error", err
     client.close()
 
 proc handleClient(client: Client) {.async.} =
   ## handle a new client
 
+  logClient()
+
   defer:
-    info client, ": ", "client is closed"
+    info "client is closed"
     client.close()
 
   # 1. proxy handshake
   var remoteAddress: (string, uint16)
   try:
     remoteAddress = await client.proxyHandshake()
-  except Exception as e:
-    error client, ": ", fmt"proxy handshake error: err={e.msg}"
+  except Exception as err:
+    error "proxy handshake error", err
     return
 
   # 2. process TLS client hello
-  info client, ": ", "process TLS client hello"
+  info "process TLS client hello"
   var tlsClientHelloData: (string, seq[string])
   try:
     tlsClientHelloData = await client.processTlsClientHello()
-  except Exception as e:
-    error client, ": ", fmt"process TLS client hello error: err={e.msg}"
+  except Exception as err:
+    error "process TLS client hello error", err
     return
 
   let (sni, fragmentList) = tlsClientHelloData
@@ -283,40 +290,41 @@ proc handleClient(client: Client) {.async.} =
     remoteAddress = (sni, 443)
 
   assert remoteAddress != default((string, uint16))
+  client.remoteAddress = remoteAddress
 
   # 3. client connect to remote server
   try:
-    info client, ": ", fmt"connect remote server {remoteAddress}"
-    await client.connectRemote(remoteAddress)
-  except Exception as e:
-    error client, ": ", fmt"connect remote server error: {remoteAddress}, err={e.msg}"
+    info "connect remote server"
+    await client.connectRemote()
+  except Exception as err:
+    error "connect remote server error", err
     return
 
   # 4. send tls client hello
   try:
-    info client, ": ", fmt"send TLS client hello, {fragmentList.len=}"
+    info "send TLS client hello", fragmentListLen = fragmentList.len
     for fragment in fragmentList:
       await sleepAsync 10
       await client.remoteSock.send(fragment)
-  except Exception as e:
-    error client, ": ", fmt"send TLS client hello error, err={e.msg}"
+  except Exception as err:
+    error "send TLS client hello error", err
     return
 
   # 5. spawn downstreaming
   try:
-    debug client, ": ", "spawn downstreaming"
+    debug "spawn downstreaming"
     asyncCheck client.downstreaming()
-  except Exception as e:
-    error client, ": ", fmt"failed to spawn downstreaming, err={e.msg}"
+  except Exception as err:
+    error "failed to spawn downstreaming", err
     return
 
   # 6. upstreaming
   try:
-    debug client, ": ", "upstreaming"
+    debug "upstreaming"
     await client.upstreaming()
-  except Exception as e:
-    if e.msg != "Bad file descriptor":
-      error client, ": ", fmt"upstream error: err={e.msg}"
+  except Exception as err:
+    if err.msg != "Bad file descriptor":
+      error "upstreaming error", err
     return
 
 # === Server ===
@@ -340,7 +348,7 @@ proc start(server: Server) {.async.} =
   server.sock.bindAddr(Port(server.config.port), server.config.host)
   server.sock.listen(backlog = server.config.backlog)
 
-  info fmt"server is listening at {server.sock.getLocalAddr()}"
+  info "server is listening", address = server.sock.getLocalAddr()
 
   let doh = newDoh(proxyUrl = fmt"http://{server.config.host}:{server.config.port}")
 
@@ -349,7 +357,7 @@ proc start(server: Server) {.async.} =
     server.sock.close()
 
   while true:
-    var client = Client(config: config.client, id: genOid())
+    var client = Client(config: common.config.client, id: genOid())
     let clientSock = await server.sock.accept()
     client.sock = clientSock
     client.address = client.sock.getPeerAddr()
@@ -358,6 +366,6 @@ proc start(server: Server) {.async.} =
 
 # === Main ===
 
-var server = Server(config: config.server)
+var server = Server(config: common.config.server)
 asyncCheck server.start()
 runForever()

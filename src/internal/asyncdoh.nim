@@ -1,8 +1,5 @@
-import
-  std/[
-    asyncdispatch, httpclient, json, strutils, strformat, sequtils, logging, strtabs,
-    tables, times,
-  ]
+import std/[asyncdispatch, httpclient, json, strutils, sequtils, strtabs, tables, times]
+import chronicles
 
 type CacheLoader = proc(k: string): Future[string] {.async, closure.}
 
@@ -21,7 +18,7 @@ proc newCache(loader: CacheLoader): Cache =
 proc get(cache: Cache, key: string): Future[string] {.async.} =
   if cache.tab.contains(key):
     let value = cache.tab[key]
-    debug fmt"DoH cache hit: {key} -> {value}"
+    debug "DoH cache hit", key = key, value = value
     return value
 
   if cache.loadingFutTab.contains(key):
@@ -31,7 +28,7 @@ proc get(cache: Cache, key: string): Future[string] {.async.} =
   let loadingFut = newFuture[void]("DoH cache loading future: key=" & $key)
   cache.loadingFutTab[key] = loadingFut
   try:
-    debug fmt"DoH cache loading: {key}"
+    debug "DoH cache loading", key = key
     let value = await cache.loader(key)
     cache.tab[key] = value
     return value
@@ -63,7 +60,7 @@ proc resolveViaRemote(
     headers = newHttpHeaders({"Accept": "application/dns-json"}),
   )
   let data = await response.body()
-  debug fmt"DoH resolve via remote: {qDomain=}, response {data=}"
+  debug "DoH resolve via remote", qDomain = qDomain, data = data
 
   let jsonObj = parseJson(data)
   let answerList = jsonObj["Answer"]
@@ -81,7 +78,8 @@ proc resolveViaCache(doh: Doh, qDomain: string): Future[string] {.async.} =
   let (ip, exp) = (ipAndExp[0], ipAndExp[1])
   if exp.parseInt() < getTime().toUnix():
     doh.cache.del qDomain
-    info fmt"DoH resolved via cache failed, maybe expired, trying resolve via remote {qDomain=}"
+    info "DoH resolved via cache failed, maybe expired, trying resolve via remote",
+      qDomain = qDomain
     return await resolveViaCache(doh, qDomain)
   return ip
 

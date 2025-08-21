@@ -14,6 +14,8 @@ requires "nim >= 2.2.4"
 
 requires "weave >= 0.4.10"
 
+requires "chronicles >= 0.12.1"
+
 task buildSync, "build sync version":
   exec "nimble build --verbose -d:release -d:lto --mm:atomicArc"
 
