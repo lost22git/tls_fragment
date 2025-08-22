@@ -96,7 +96,7 @@ proc socks5ProxyHandshake(client: Client): Future[(string, uint16)] {.async.} =
         ValueError, "socks5 proxy handshake error: address type not supported"
       )
     else:
-      info "socks5 proxy handshake extracted remote address", remoteAddr
+      info "socks5 proxy handshake: extracted remote address", remoteAddr
       await client.sock.send("\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
       return remoteAddr
   else:
@@ -133,7 +133,7 @@ proc httpProxyHandshake(client: Client): Future[(string, uint16)] {.async.} =
       "HTTP/1.1 400 Bad Request\r\nProxy-agent: MyProxy/1.0\r\n\r\n"
     )
     raise newException(ValueError, "http proxy handshake error: remoteAddr not found")
-  info "http proxy handshake extracted remote address", remoteAddr
+  info "http proxy handshake: extracted remote address", remoteAddr
   await client.sock.send(
     "HTTP/1.1 200 Connection established\r\nProxy-agent: MyProxy/1.0\r\n\r\n"
   )
@@ -216,7 +216,7 @@ proc connectRemote(client: Client) {.async.} =
     host = await client.doh.resolve(domain)
     info "DoH resolved", domain, host
   except Exception as e:
-    raise newException(ValueError, fmt"DoH resolve error, {domain=}, err={e.msg}")
+    raise newException(ValueError, fmt"DoH resolve error: {domain=}, err={e.msg}")
 
   # connect remote
   let remoteSock = newAsyncSocket(buffered = false)

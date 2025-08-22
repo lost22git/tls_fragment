@@ -103,7 +103,7 @@ proc socks5ProxyHandshake(client: Client): (string, uint16) =
         ValueError, "socks5 proxy handshake error: address type not supported"
       )
     else:
-      info "socks5 proxy handshake extracted remote addresss", remoteAddr
+      info "socks5 proxy handshake: extracted remote addresss", remoteAddr
       client.sock.send("\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
       return remoteAddr
   else:
@@ -138,7 +138,7 @@ proc httpProxyHandshake(client: Client): (string, uint16) =
   if remoteAddr == default((string, uint16)):
     client.sock.send("HTTP/1.1 400 Bad Request\r\nProxy-agent: MyProxy/1.0\r\n\r\n")
     raise newException(ValueError, "http proxy handshake error: remoteAddr not found")
-  info "http proxy handshake extracted remote address", remoteAddr
+  info "http proxy handshake: extracted remote address", remoteAddr
   client.sock.send(
     "HTTP/1.1 200 Connection established\r\nProxy-agent: MyProxy/1.0\r\n\r\n"
   )
