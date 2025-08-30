@@ -1,0 +1,10 @@
+### cloudflare-dns "A"
+
+GET https://cloudflare-dns.com/dns-query?name=github.com&type=A HTTP/1.1
+Accept: application/dns-json
+
+
+### cloudflare-dns "AAAA"
+
+GET https://cloudflare-dns.com/dns-query?name=rr5---sn-a5msenek.googlevideo.com&type=AAAA HTTP/1.1
+Accept: application/dns-json

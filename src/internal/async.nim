@@ -1,4 +1,4 @@
-import std/[strformat, strutils, net, asyncnet, asyncdispatch, oids]
+import std/[strformat, strutils, net, asyncnet, asyncdispatch, oids, json]
 import ./common
 import ./asyncdoh
 import chronicles
@@ -16,6 +16,7 @@ type Client = ref object
   remoteAddress: (string, uint16)
   proxyProtocol: ProxyProtocol
   doh: Doh
+  policy: JsonNode
 
 proc close(client: Client) =
   ## close client
@@ -209,19 +210,26 @@ proc connectRemote(client: Client) {.async.} =
 
   logClient()
 
+  var host = client.policy.getOrDefault("IP").getStr()
+  var port = client.policy.getOrDefault("port").getInt(443)
+  let af =
+    if client.policy.getOrDefault("IPtype").getStr() == "ipv6": AF_INET6 else: AF_INET
+
   # resolve ip via DoH
-  var host = ""
-  let domain = client.remoteAddress[0]
-  try:
-    host = await client.doh.resolve(domain)
-    info "DoH resolved", domain, host
-  except Exception as e:
-    raise newException(ValueError, fmt"DoH resolve error: {domain=}, err={e.msg}")
+  if host == "":
+    let domain = client.remoteAddress[0]
+    let qType = if af == AF_INET6: "AAAA" else: "A"
+    try:
+      host = await client.doh.resolve(domain, qType)
+      info "DoH resolved", domain, qType, host
+    except Exception as e:
+      raise newException(ValueError, fmt"DoH resolve error: {domain=}, err={e.msg}")
 
   # connect remote
-  let remoteSock = newAsyncSocket(buffered = false)
+  info "connect to remote", af, host, port
+  let remoteSock = newAsyncSocket(domain = af, buffered = false)
   remoteSock.setSockOpt(OptNoDelay, true, level = IPPROTO_TCP.cint)
-  await remoteSock.connect(host, 443.Port)
+  await remoteSock.connect(host, Port(port))
 
   # bind info to client
   client.remoteSock = remoteSock
@@ -277,7 +285,6 @@ proc handleClient(client: Client) {.async.} =
     return
 
   # 2. process TLS client hello
-  info "process TLS client hello"
   var tlsClientHelloData: (string, seq[string])
   try:
     tlsClientHelloData = await client.processTlsClientHello()
@@ -291,13 +298,14 @@ proc handleClient(client: Client) {.async.} =
 
   assert remoteAddress != default((string, uint16))
   client.remoteAddress = remoteAddress
+  client.policy = getPolicy(remoteAddress[0])
+  info "policy used", policy = client.policy.pretty()
 
-  # 3. client connect to remote server
+  # 3. client connect to remote
   try:
-    info "connect remote server"
     await client.connectRemote()
   except Exception as err:
-    error "connect remote server error", err
+    error "connect to remote error", err
     return
 
   # 4. send tls client hello
@@ -312,7 +320,6 @@ proc handleClient(client: Client) {.async.} =
 
   # 5. spawn downstreaming
   try:
-    debug "spawn downstreaming"
     asyncCheck client.downstreaming()
   except Exception as err:
     error "failed to spawn downstreaming", err
@@ -320,7 +327,6 @@ proc handleClient(client: Client) {.async.} =
 
   # 6. upstreaming
   try:
-    debug "upstreaming"
     await client.upstreaming()
   except Exception as err:
     if err.msg != "Bad file descriptor":

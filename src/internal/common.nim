@@ -1,4 +1,5 @@
-import std/[strformat, net, exitprocs, random, strutils]
+import std/[strformat, net, exitprocs, random, strutils, json, algorithm, tables]
+
 import chronicles
 
 func be16*(data: openArray[char]): uint16 =
@@ -155,6 +156,42 @@ proc fragmentizeTlsClientHello*(
 
 # === Config ===
 
+proc expand(s: string): seq[string] =
+  ## expand `"www.(google|github).com"` to `["www.google.com","www.github.com"]`
+
+  var
+    matches: seq[seq[string]] = @[]
+    m = 0
+    i = 0
+  for c in s:
+    case c
+    of '(':
+      if i != 0 and i != m:
+        matches.add @[s[m ..< i]]
+      m = i
+    of ')':
+      matches.add split(s[(m + 1) ..< i], "|")
+      m = i + 1
+    else:
+      discard
+    inc i
+  if m <= s.high:
+    matches.add @[s[m .. s.high]]
+  case matches.len
+  of 0:
+    return
+  of 1:
+    return matches[0]
+  else:
+    for v in product(matches):
+      result.add join(v)
+
+proc loadPolicy(): TableRef[string, JsonNode] =
+  result = newTable[string, JsonNode]()
+  for k, v in pairs(parseFile("config.json")["domains"]):
+    for domain in expand(k):
+      result[domain] = v
+
 type ServerConfig* = object
   host*: string = "127.0.0.1"
   port*: uint16 = 9933
@@ -168,6 +205,16 @@ type Config* = object
   client*: ClientConfig
 
 let config* = Config()
+let policy = loadPolicy()
+
+proc getPolicy*(domain: string): JsonNode =
+  {.gcsafe.}:
+    for d, v in pairs(policy):
+      if domain == d or domain.endsWith(d):
+        result = v
+
+    if result == nil:
+      result = %*{}
 
 # === Logging ===
 

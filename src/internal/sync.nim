@@ -1,4 +1,4 @@
-import std/[strformat, strutils, sequtils, net, typedThreads, oids]
+import std/[strformat, strutils, sequtils, net, typedThreads, oids, json]
 import ./common
 import chronicles
 
@@ -23,6 +23,7 @@ type Client = ref object
   when not defined(pool):
     runThread: Thread[Client]
     downstreamThread: Thread[Client]
+  policy: JsonNode
 
 proc close(client: Client) =
   ## close client
@@ -215,10 +216,18 @@ proc connectRemote(client: Client) =
   ## TODO:
   ## 1. doh resolve remoteAddress
 
-  let remoteSock = newSocket(buffered = false)
+  var host = client.policy.getOrDefault("IP").getStr()
+  var port = client.policy.getOrDefault("port").getInt(443)
+  let af =
+    if client.policy.getOrDefault("IPtype").getStr() == "ipv6": AF_INET6 else: AF_INET
+
+  if host == "":
+    (host, port) = client.remoteAddress
+
+  info "connect to remote", af, host, port
+  let remoteSock = newSocket(domain = af, buffered = false)
   remoteSock.setSockOpt(OptNoDelay, true, level = IPPROTO_TCP.cint)
-  let (host, port) = client.remoteAddress
-  remoteSock.connect(host, port.Port, timeout = client.config.cnnTimeout)
+  remoteSock.connect(host, Port(port), timeout = client.config.cnnTimeout)
   client.remoteSock = remoteSock
 
 proc upstreaming(client: Client) =
@@ -272,7 +281,6 @@ proc handleClient(client: Client) {.thread.} =
     return
 
   # 2. process TLS client hello
-  info "process TLS client hello"
   var tlsClientHelloData: (string, seq[string])
   try:
     tlsClientHelloData = client.processTlsClientHello()
@@ -286,13 +294,14 @@ proc handleClient(client: Client) {.thread.} =
 
   assert remoteAddress != default((string, uint16))
   client.remoteAddress = remoteAddress
+  client.policy = getPolicy(remoteAddress[0])
+  info "policy used", policy = client.policy.pretty()
 
-  # 3. client connect to remote server
+  # 3. client connect to remote
   try:
-    info "connect remote server"
     client.connectRemote()
   except Exception as err:
-    error "connect remote server error", err
+    error "connect to remote error", err
     return
 
   # 4. send tls client hello
@@ -306,7 +315,6 @@ proc handleClient(client: Client) {.thread.} =
 
   # 5. spawn downstreaming
   try:
-    debug "spawn downstreaming"
     when defined(pool):
       spawn client.downstreaming()
     else:
@@ -317,7 +325,6 @@ proc handleClient(client: Client) {.thread.} =
 
   # 6. upstreaming
   try:
-    debug "upstreaming"
     client.upstreaming()
   except Exception as err:
     if err.msg != "Bad file descriptor":
