@@ -1,4 +1,4 @@
-
+# WIP
 
 
 | Problem | Resolution |
@@ -17,5 +17,5 @@
 
 
 TODO:
-1. domain fronting
+1. domain fronting?
 
