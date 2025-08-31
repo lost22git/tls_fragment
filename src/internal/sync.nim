@@ -289,12 +289,11 @@ proc handleClient(client: Client) {.thread.} =
     return
 
   let (sni, fragmentList) = tlsClientHelloData
-  if client.proxyProtocol == None:
+  if client.proxyProtocol == None or isIpAddress(remoteAddress[0]):
     remoteAddress = (sni, 443)
 
-  assert remoteAddress != default((string, uint16))
   client.remoteAddress = remoteAddress
-  client.policy = getPolicy(remoteAddress[0])
+  client.policy = getPolicy(client.remoteAddress[0])
   info "policy used", policy = client.policy.pretty()
 
   # 3. client connect to remote
