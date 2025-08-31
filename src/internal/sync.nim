@@ -217,7 +217,7 @@ proc connectRemote(client: Client) =
   ## 1. doh resolve remoteAddress
 
   var host = client.policy.getOrDefault("IP").getStr()
-  var port = client.policy.getOrDefault("port").getInt(443)
+  var port = client.policy.getOrDefault("port").getInt(443).uint16
   let af =
     if client.policy.getOrDefault("IPtype").getStr() == "ipv6": AF_INET6 else: AF_INET
 
