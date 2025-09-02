@@ -84,18 +84,17 @@ proc resolveViaCache(doh: Doh, domainAndType: string): Future[string] {.async.} 
   debug "DoH resolved via cache failed, maybe expired, try again", domainAndType
   return await resolveViaCache(doh, domainAndType)
 
-proc newDoh*(proxyUrl: string): Doh =
-  let doh = Doh(proxy: newProxy(url = proxyUrl))
-  doh.cache = newCache(
-    loader = proc(k: string): Future[string] {.async, closure.} =
-      let domainAndType = k.split("/")
-      return await doh.resolveViaRemote(domainAndType[0], domainAndType[1])
-  )
-  return doh
-
 proc resolve*(
     doh: Doh, qDomain: string, qType: string = "A"
 ): Future[string] {.async.} =
   if qDomain in ["cloudflare-dns.com", "one.one.one.one"] and qType == "A":
     return "104.16.249.249"
   return await doh.resolveViaCache(qDomain & "/" & qType)
+
+proc newDoh*(proxyUrl: string): Doh =
+  result = Doh(proxy: newProxy(url = proxyUrl))
+  result.cache = newCache(
+    loader = proc(k: string): Future[string] {.async, closure.} =
+      let domainAndType = k.split("/")
+      return await doh.resolveViaRemote(domainAndType[0], domainAndType[1])
+  )
