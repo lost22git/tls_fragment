@@ -16,6 +16,8 @@ requires "weave >= 0.4.10"
 
 requires "chronicles >= 0.12.1"
 
+requires "threading >= 0.2.1"
+
 task buildSync, "build sync version":
   exec "nimble build --verbose -d:release -d:lto --mm:atomicArc"
 
@@ -24,3 +26,4 @@ task buildPool, "build thread pool version":
 
 task buildAsync, "build async version":
   exec "nimble build --verbose -d:release -d:lto --threads:off -d:useMalloc -d:async"
+

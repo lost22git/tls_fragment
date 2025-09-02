@@ -1,5 +1,6 @@
 import std/[strformat, strutils, sequtils, net, typedThreads, oids, json]
 import ./common
+import ./syncdoh
 import chronicles
 
 when defined(pool):
@@ -23,6 +24,7 @@ type Client = ref object
   when not defined(pool):
     runThread: Thread[Client]
     downstreamThread: Thread[Client]
+  doh: Doh
   policy: JsonNode
 
 proc close(client: Client) =
@@ -206,23 +208,30 @@ proc processTlsClientHello(client: Client): (string, seq[string]) =
   info "sni parsed", sni
 
   # fragmentize TLS client hello
-  let fragmentList = fragmentizeTlsClientHello(handshakeData, sni, recordHeader[..2])
+  let fragmentList = fragmentizeTlsClientHello(handshakeData, sni, recordHeader[0 .. 2])
 
   return (sni, fragmentList)
 
 proc connectRemote(client: Client) =
   ## connect to remote
-  ##
-  ## TODO:
-  ## 1. doh resolve remoteAddress
+
+  logClient()
 
   var host = client.policy.getOrDefault("IP").getStr()
   var port = client.policy.getOrDefault("port").getInt(443).uint16
   let af =
     if client.policy.getOrDefault("IPtype").getStr() == "ipv6": AF_INET6 else: AF_INET
 
+  # resolve ip via DoH
   if host == "":
-    (host, port) = client.remoteAddress
+    let domain = client.remoteAddress[0]
+    let qType = if af == AF_INET6: "AAAA" else: "A"
+    try:
+      {.gcsafe.}:
+        host = client.doh.resolve(domain, qType)
+      info "DoH resolved", domain, qType, host
+    except Exception as e:
+      raise newException(ValueError, fmt"DoH resolve error: {domain=}, err={e.msg}")
 
   info "connect to remote", af, host, port
   let remoteSock = newSocket(domain = af, buffered = false)
@@ -363,6 +372,8 @@ proc start(server: Server) {.thread.} =
 
   info "server is listening", address = server.sock.getLocalAddr()
 
+  let doh = newDoh(proxyUrl = fmt"http://{server.config.host}:{server.config.port}")
+
   defer:
     info "server is closed"
     server.sock.close()
@@ -379,6 +390,7 @@ proc start(server: Server) {.thread.} =
       var client = Client(config: common.config.client, id: genOid())
     server.sock.accept(client.sock)
     client.address = client.sock.getPeerAddr()
+    client.doh = doh
     when defined(pool):
       spawn handleClient(client)
     else:

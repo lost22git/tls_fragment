@@ -4,7 +4,7 @@ import chronicles
 type CacheLoader = proc(k: string): Future[string] {.async, closure.}
 
 type Cache = ref object
-  tab: StringTableRef # store domain -> ip/expiredTime
+  tab: StringTableRef # store domain/type -> ip/expiredTime
   loader: CacheLoader
   loadingFutTab: TableRef[string, Future[void]]
 
@@ -60,7 +60,7 @@ proc resolveViaRemote(
     headers = newHttpHeaders({"Accept": "application/dns-json"}),
   )
   let data = await response.body()
-  debug "DoH resolve via remote", qDomain, data
+  info "DoH resolve via remote", qDomain, data
 
   let jsonObj = parseJson(data)
   let answerList = jsonObj["Answer"]
@@ -74,14 +74,15 @@ proc resolveViaRemote(
   return $ip & "/" & $exp
 
 proc resolveViaCache(doh: Doh, domainAndType: string): Future[string] {.async.} =
-  let value = await doh.cache.get(domainAndType)
-  let ipAndExp = split(value, "/")
-  let (ip, exp) = (ipAndExp[0], ipAndExp[1])
-  if exp.parseInt() < getTime().toUnix():
-    doh.cache.del domainAndType
-    info "DoH resolved via cache failed, maybe expired, try again", domainAndType
-    return await resolveViaCache(doh, domainAndType)
-  return ip
+  let
+    value = await doh.cache.get(domainAndType)
+    ipAndExp = split(value, "/")
+    (ip, exp) = (ipAndExp[0], ipAndExp[1])
+  if exp.parseInt() >= getTime().toUnix():
+    return ip
+  doh.cache.del domainAndType
+  debug "DoH resolved via cache failed, maybe expired, try again", domainAndType
+  return await resolveViaCache(doh, domainAndType)
 
 proc newDoh*(proxyUrl: string): Doh =
   let doh = Doh(proxy: newProxy(url = proxyUrl))
