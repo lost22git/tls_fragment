@@ -45,7 +45,7 @@ type DashTable[K, V] = ref object
 
 let defaultShards = (max(1, countProcessors()) * 4).nextPowerOfTwo()
 
-proc myhash[K, V](table: DashTable[K, V], key: K): Hash =
+proc myhash[K, V](table: DashTable[K, V], key: K): Hash {.inline.} =
   hashes.hash(key)
 
 proc shardWithIndex[K, V](
