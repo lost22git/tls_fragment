@@ -27,3 +27,5 @@ task buildPool, "build thread pool version":
 task buildAsync, "build async version":
   exec "nimble build --verbose -d:release -d:lto --threads:off -d:useMalloc -d:async"
 
+task printProcessInfo, "print process info":
+  exec "ps Hu $(pgrep tls_fragment)"
