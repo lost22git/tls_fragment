@@ -15,7 +15,6 @@ type LazyValueObj[T, A] = object
 type LazyValue[T, A] = ref LazyValueObj[T, A]
 
 proc `=destroy`[T, A](lazyValue: var LazyValueObj[T, A]) =
-  echo "destroy is calling"
   deinitLock(lazyValue.lock)
 
 proc newLazyValue[T, A](loader: proc(arg: A): T, loaderArg: A): LazyValue[T, A] =
