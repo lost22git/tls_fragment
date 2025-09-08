@@ -47,7 +47,7 @@ let dohUrl = "https://cloudflare-dns.com/dns-query?name=$1&type=$2"
 
 proc resolveViaRemote(
     doh: Doh, qDomain: string, qType: string
-): Future[string] {.async.} =
+): Future[(string, int64)] {.async.} =
   let url = dohUrl % [qDomain, qType]
 
   let client = newAsyncHttpClient(proxy = doh.proxy)
@@ -71,7 +71,7 @@ proc resolveViaRemote(
   let firstAnswer = ipAnswerList[0]
   let ip = firstAnswer["data"].getStr
   let exp = getTime().toUnix() + firstAnswer["TTL"].getInt - 10 # expires 10s in advance
-  return $ip & "/" & $exp
+  return (ip, exp)
 
 proc resolveViaCache(doh: Doh, domainAndType: string): Future[string] {.async.} =
   let
@@ -92,9 +92,11 @@ proc resolve*(
   return await doh.resolveViaCache(qDomain & "/" & qType)
 
 proc newDoh*(proxyUrl: string): Doh =
-  result = Doh(proxy: newProxy(url = proxyUrl))
-  result.cache = newCache(
+  let doh = Doh(proxy: newProxy(url = proxyUrl))
+  doh.cache = newCache(
     loader = proc(k: string): Future[string] {.async, closure.} =
       let domainAndType = k.split("/")
-      return await doh.resolveViaRemote(domainAndType[0], domainAndType[1])
+      let (ip, exp) = await doh.resolveViaRemote(domainAndType[0], domainAndType[1])
+      return ip & "/" & $exp
   )
+  return doh
