@@ -278,7 +278,7 @@ proc handleClient(client: Client) {.thread.} =
   logClient()
 
   defer:
-    info "client is closed"
+    info "client closed"
     client.close()
 
   # 1. proxy handshake
@@ -370,12 +370,12 @@ proc start(server: Server) {.thread.} =
   server.sock.bindAddr(Port(server.config.port), server.config.host)
   server.sock.listen(backlog = server.config.backlog)
 
-  info "server is listening", address = server.sock.getLocalAddr()
+  info "server listening", address = server.sock.getLocalAddr()
 
   let doh = newDoh(proxyUrl = fmt"http://{server.config.host}:{server.config.port}")
 
   defer:
-    info "server is closed"
+    info "server closed"
     server.sock.close()
     when not defined(pool):
       for client in server.clientList:
