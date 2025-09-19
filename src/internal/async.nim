@@ -335,7 +335,7 @@ proc handleClient(client: Client) {.async.} =
 # === Server ===
 
 type Server = ref object
-  config: ServerConfig
+  config: Config
   sock: AsyncSocket
 
 proc close(server: Server) =
@@ -350,19 +350,21 @@ proc start(server: Server) {.async.} =
   server.sock = newAsyncSocket(buffered = false)
   server.sock.setSockOpt(OptReusePort, true)
   server.sock.setSockOpt(OptReuseAddr, true)
-  server.sock.bindAddr(Port(server.config.port), server.config.host)
-  server.sock.listen(backlog = server.config.backlog)
+  server.sock.bindAddr(Port(server.config.server.port), server.config.server.host)
+  server.sock.listen(backlog = server.config.server.backlog)
 
   info "server listening", address = server.sock.getLocalAddr()
 
-  let doh = newDoh(proxyUrl = fmt"http://{server.config.host}:{server.config.port}")
+  let doh = newDoh(
+    proxyUrl = fmt"http://{server.config.server.host}:{server.config.server.port}"
+  )
 
   defer:
     info "server closed"
     server.sock.close()
 
   while true:
-    var client = Client(config: common.config.client, id: genOid())
+    var client = Client(config: server.config.client, id: genOid())
     let clientSock = await server.sock.accept()
     client.sock = clientSock
     client.address = client.sock.getPeerAddr()
@@ -371,6 +373,6 @@ proc start(server: Server) {.async.} =
 
 # === Main ===
 
-var server = Server(config: common.config.server)
+var server = Server(config: common.config)
 asyncCheck server.start()
 runForever()
