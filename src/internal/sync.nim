@@ -249,7 +249,8 @@ proc upstreaming(client: Client) =
   while true:
     let data = client.sock.recv(16384)
     if data == "":
-      raise newException(ValueError, "upstreaming data is EOF (client is disconnected)")
+      info "upstreaming data EOF"
+      return
     debug "upstreaming", dataLen = data.len
     debug "upstreaming", data
     client.remoteSock.send(data)
@@ -267,15 +268,13 @@ proc downstreaming(client: Client) {.thread.} =
     while true:
       let data = client.remoteSock.recv(16384)
       if data == "":
-        raise newException(
-          ValueError, "downstreaming data is EOF (remote server is disconnected)"
-        )
+        info "downstreaming data EOF"
+        return
       debug "downstreaming", dataLen = data.len
       debug "downstreaming", data
       client.sock.send(data)
   except Exception as err:
-    if err.msg != "Bad file descriptor":
-      error "downstreaming error", err
+    error "downstreaming error", err
 
 proc handleClient(client: Client) {.thread.} =
   ## handle a new client
@@ -340,8 +339,7 @@ proc handleClient(client: Client) {.thread.} =
   try:
     client.upstreaming()
   except Exception as err:
-    if err.msg != "Bad file descriptor":
-      error "upstreaming error", err
+    error "upstreaming error", err
     return
 
 # === Server ===
