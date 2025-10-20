@@ -20,9 +20,11 @@ type Client = ref object
 
 proc close(client: Client) =
   ## close client
-
   if client.sock != nil:
     client.sock.close()
+
+proc closeRemote(client: Client) =
+  ## close remote
   if client.remoteSock != nil:
     client.remoteSock.close()
 
@@ -252,6 +254,10 @@ proc downstreaming(client: Client) {.async.} =
 
   logClient()
 
+  defer:
+    info "remote closed"
+    client.closeRemote()
+
   try:
     while true:
       let data = await client.remoteSock.recv(16384)
@@ -265,7 +271,6 @@ proc downstreaming(client: Client) {.async.} =
   except Exception as err:
     if err.msg != "Bad file descriptor":
       error "downstreaming error", err
-    client.close()
 
 proc handleClient(client: Client) {.async.} =
   ## handle a new client
